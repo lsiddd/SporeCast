@@ -1,0 +1,166 @@
+version: '3.8'
+
+services:
+  setup_certs:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    volumes:
+      - certs:/usr/share/elasticsearch/config/certs
+    user: "0"
+    command: >
+      bash -c '
+        if [ ! -f config/certs/ca.zip ]; then
+          echo "Creating CA";
+          bin/elasticsearch-certutil ca --silent --pem -out config/certs/ca.zip;
+          unzip config/certs/ca.zip -d config/certs;
+        fi;
+        if [ ! -f config/certs/certs.zip ]; then
+          echo "Creating certs";
+          echo -ne \
+          "instances:\n"\
+          "  - name: elasticsearch\n"\
+          "    dns:\n"\
+          "      - elasticsearch\n"\
+          "      - localhost\n"\
+          "    ip:\n"\
+          "      - 127.0.0.1\n"\
+          > config/certs/instances.yml;
+          bin/elasticsearch-certutil cert --silent --pem -out config/certs/certs.zip --in config/certs/instances.yml --ca-cert config/certs/ca/ca.crt --ca-key config/certs/ca/ca.key;
+          unzip config/certs/certs.zip -d config/certs;
+        fi;
+        echo "Setting file permissions";
+        chown -R 1000:0 config/certs;
+      '
+    healthcheck:
+      test: ["CMD-SHELL", "cat config/certs/ca/ca.crt"]
+      interval: 1s
+      timeout: 5s
+      retries: 120
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    container_name: elasticsearch
+    depends_on:
+      setup_certs:
+        condition: service_healthy
+    environment:
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - xpack.security.enabled=true
+      - xpack.security.http.ssl.enabled=true
+      - xpack.security.http.ssl.key=certs/elasticsearch/elasticsearch.key
+      - xpack.security.http.ssl.certificate=certs/elasticsearch/elasticsearch.crt
+      - xpack.security.http.ssl.certificate_authorities=certs/ca/ca.crt
+      - xpack.security.transport.ssl.enabled=true
+      - xpack.security.transport.ssl.key=certs/elasticsearch/elasticsearch.key
+      - xpack.security.transport.ssl.certificate=certs/elasticsearch/elasticsearch.crt
+      - xpack.security.transport.ssl.certificate_authorities=certs/ca/ca.crt
+      - xpack.security.transport.ssl.verification_mode=certificate
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+      - certs:/usr/share/elasticsearch/config/certs
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 65536, hard: 65536 }
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -s --cacert config/certs/ca/ca.crt -u elastic:${ELASTIC_PASSWORD} https://localhost:9200/_cluster/health | grep -E -q '\"status\":\"(green|yellow)\"'"
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  kibana-setup:
+    # Build the image from the Dockerfile in the kibana-setup directory
+    build: ./kibana-setup
+    container_name: kibana-setup
+    user: "0"
+    volumes:
+      - certs:/certs:ro
+      - kibana_token:/token
+    command: >
+      sh -c '
+        set -ex
+        
+        echo "Waiting for Elasticsearch to be healthy...";
+        until curl -s --cacert /certs/ca/ca.crt -u elastic:${ELASTIC_PASSWORD} https://elasticsearch:9200/_cluster/health | grep -q "green\|yellow"; do
+          sleep 5
+        done;
+        
+        echo "Elasticsearch is healthy. Creating Kibana service token...";
+        curl -s -X POST --cacert /certs/ca/ca.crt -u elastic:${ELASTIC_PASSWORD} https://elasticsearch:9200/_security/service/elastic/kibana/credential/token > /token/kibana_token.json;
+        
+        echo "Extracting token with jq...";
+        # Use jq to reliably extract the token value. This is guaranteed to work.
+        jq -r ".token.value" /token/kibana_token.json > /token/kibana.token;
+        
+        if [ -s /token/kibana.token ]; then
+            echo "Token value successfully written to file.";
+            exit 0;
+        else
+            echo "ERROR: Failed to extract token with jq.";
+            cat /token/kibana_token.json;
+            exit 1;
+        fi
+      '
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.13.4
+    container_name: kibana
+    volumes:
+      - certs:/usr/share/kibana/config/certs:ro
+      - kibana_token:/usr/share/kibana/config/token:ro
+    command: >
+      bash -c '
+        echo "Waiting for token value file...";
+        while [ ! -f /usr/share/kibana/config/token/kibana.token ]; do
+          sleep 2;
+        done;
+        # Corrected environment variable name below
+        export ELASTICSEARCH_SERVICEACCOUNTTOKEN=$(cat /usr/share/kibana/config/token/kibana.token);
+        /usr/local/bin/kibana-docker
+      '
+    ports:
+      - "5601:5601"
+    environment:
+      - SERVER_HOST=0.0.0.0
+      - ELASTICSEARCH_HOSTS=["https://elasticsearch:9200"]
+      - ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES=/usr/share/kibana/config/certs/ca/ca.crt
+      # Add these encryption keys for a robust setup.
+      # Replace the placeholder values with your own securely generated random strings (at least 32 characters long).
+      - XPACK_SECURITY_ENCRYPTIONKEY=replace_with_a_secure_random_string_32_chars
+      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=replace_with_another_secure_random_string_32_chars
+      - XPACK_REPORTING_ENCRYPTIONKEY=replace_with_a_third_secure_random_string_32_chars
+    depends_on:
+      kibana-setup:
+        condition: service_completed_successfully
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.13.4
+    container_name: logstash
+    volumes:
+      - ./logstash.conf:/usr/share/logstash/pipeline/logstash.conf:ro
+      - certs:/usr/share/logstash/config/certs:ro
+    ports:
+      - "15000:15000/tcp"
+      - "5140:5140/tcp"
+    environment:
+      - ELASTIC_USER=elastic
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - XPACK_MONITORING_ENABLED=true
+      - XPACK_MONITORING_ELASTICSEARCH_USERNAME=elastic
+      - XPACK_MONITORING_ELASTICSEARCH_PASSWORD=${ELASTIC_PASSWORD}
+      - XPACK_MONITORING_ELASTICSEARCH_SSL_CERTIFICATE_AUTHORITY=/usr/share/logstash/config/certs/ca/ca.crt
+      - XPACK_MONITORING_ELASTICSEARCH_HOSTS=https://elasticsearch:9200
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
+volumes:
+  esdata:
+  certs:
+  kibana_token:
