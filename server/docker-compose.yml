@@ -147,7 +147,8 @@ services:
       - certs:/usr/share/logstash/config/certs:ro
     ports:
       - "15000:15000/tcp"
-      - "5140:5140/tcp"
+      - "5140:5140/tcp" # segup wazuh
+      - "5142:5142/tcp"  # prodepa wazuh
     environment:
       - ELASTIC_USER=elastic
       - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
