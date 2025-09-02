@@ -36,8 +36,9 @@ HEARTBEAT_INTERVAL = 3600  # Send a "still alive" message every hour (in seconds
 # ==============================================================================
 
 # --- Set up logging ---
+# Added DEBUG level for more granular control
 logger = logging.getLogger("wazuh_forwarder")
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG) # Set to INFO for production, DEBUG for troubleshooting
 try:
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
     handler = RotatingFileHandler(LOG_FILE, maxBytes=10*1024*1024, backupCount=5)
@@ -45,7 +46,6 @@ try:
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 except (PermissionError, IOError) as e:
-    # Fallback to console if file logging fails
     handler = logging.StreamHandler()
     formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(threadName)s - %(message)s")
     handler.setFormatter(formatter)
@@ -60,7 +60,7 @@ def send_telegram_message(message):
     if not ENABLE_TELEGRAM or TELEGRAM_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN":
         return
     api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': f"*[Wazuh-Forwarder]*\n{message}", 'parse_mode': 'Markdown'}
+    payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': f"[Wazuh-Forwarder]\n{message}", 'parse_mode': 'Markdown'}
     try:
         requests.post(api_url, json=payload, timeout=10)
     except requests.RequestException as e:
@@ -71,6 +71,7 @@ class StateManager:
     def __init__(self, state_file):
         self._state_file = state_file
         self._state = {'inode': None, 'offset': 0}
+        os.makedirs(os.path.dirname(self._state_file), exist_ok=True)
 
     def load(self):
         if not os.path.exists(self._state_file):
@@ -81,25 +82,37 @@ class StateManager:
                 self._state = json.load(f)
                 logger.info(f"Loaded previous state: Inode {self._state.get('inode')}, Offset {self._state.get('offset')}")
         except (json.JSONDecodeError, IOError) as e:
-            logger.error(f"Could not load state file, starting fresh: {e}")
+            logger.error(f"Could not load state file {self._state_file}, starting fresh: {e}")
         return self._state
 
     def save(self, inode, offset):
+        # Only write to disk if state has actually changed
+        if self._state.get('inode') == inode and self._state.get('offset') == offset:
+            return
+
         self._state = {'inode': inode, 'offset': offset}
         try:
             with open(self._state_file, 'w') as f:
                 json.dump(self._state, f)
+            logger.debug(f"Saved state: Inode={inode}, Offset={offset}")
         except IOError as e:
             logger.error(f"Failed to save state to {self._state_file}: {e}")
 
 # --- File Reader Thread ---
 class FileReader(threading.Thread):
+    """
+    Reads new lines from the alert file. It is designed to be robust against
+    file rotations and incomplete lines being written. It works by buffering
+    the last line of any read and prepending it to the next, ensuring only
+    complete lines (terminated by a newline) are processed.
+    """
     def __init__(self, alert_file, message_queue, state_manager):
         super().__init__()
         self.name = "FileReaderThread"
         self._alert_file = alert_file
         self._queue = message_queue
         self._state_manager = state_manager
+        self._line_buffer = ""  # Buffer for any incomplete line from the last read
 
     def run(self):
         logger.info("File reader thread started.")
@@ -114,29 +127,54 @@ class FileReader(threading.Thread):
 
                 stat_info = os.stat(self._alert_file)
                 if current_inode is None or stat_info.st_ino != current_inode:
-                    logger.info(f"New file or rotation detected. Old inode: {current_inode}, New inode: {stat_info.st_ino}")
+                    logger.info(f"New log file or rotation detected. Old inode: {current_inode}, New inode: {stat_info.st_ino}. Resetting to start of file.")
                     current_inode, offset = stat_info.st_ino, 0
+                    self._line_buffer = "" # Reset buffer on rotation
 
                 if stat_info.st_size < offset:
-                    logger.warning(f"File truncated. Resetting offset from {offset} to 0.")
+                    logger.warning(f"Log file appears to have been truncated. Resetting offset from {offset} to 0.")
                     offset = 0
+                    self._line_buffer = "" # Reset buffer on truncation
 
                 if offset < stat_info.st_size:
                     with open(self._alert_file, 'r', encoding='utf-8') as f:
                         f.seek(offset)
-                        for line in f:
-                            if shutdown_event.is_set(): break
-                            line = line.strip()
-                            if line:
-                                self._queue.put(line)
-                        offset = f.tell()
-                    # Persist state immediately after reading
-                    self._state_manager.save(current_inode, offset)
-                else:
-                    shutdown_event.wait(0.5) # Wait for new log entries
+                        new_data = self._line_buffer + f.read()
+
+                        if not new_data:
+                            continue
+
+                        lines = new_data.split('\n')
+                        # The last element is either an empty string (if file ends with \n)
+                        # or an incomplete line. In either case, we hold it back.
+                        self._line_buffer = lines.pop()
+
+                        lines_queued = 0
+                        for line in lines:
+                            stripped_line = line.strip()
+                            if stripped_line:
+                                try:
+                                    # Final validation that it's a valid JSON object
+                                    json.loads(stripped_line)
+                                    self._queue.put(stripped_line)
+                                    lines_queued += 1
+                                except json.JSONDecodeError:
+                                    logger.warning(f"Skipping malformed/corrupted JSON line: {stripped_line[:200]}")
+
+                        if lines_queued > 0:
+                            logger.info(f"Queued {lines_queued} new alert(s). Current queue size: {self._queue.qsize()}")
+
+                        if self._line_buffer:
+                            logger.debug(f"Holding back incomplete line fragment: '{self._line_buffer}'")
+
+                        # The new offset for the next read is where the incomplete line begins.
+                        offset = f.tell() - len(self._line_buffer.encode('utf-8'))
+
+                self._state_manager.save(current_inode, offset)
+                shutdown_event.wait(0.5)  # Wait for new log entries
 
             except Exception as e:
-                logger.exception(f"Error in file reader thread: {e}")
+                logger.exception(f"Critical error in file reader thread: {e}")
                 shutdown_event.wait(10)
 
         logger.info(f"File reader thread shutting down. Final position: Inode {current_inode}, Offset {offset}")
@@ -150,7 +188,7 @@ class ELKSender(threading.Thread):
         self._host, self._port = host, port
         self._queue = message_queue
         self._sock = None
-        self._lines_processed = 0
+        self._lines_processed_period = 0
         self._last_heartbeat_time = time.time()
 
     def _connect_with_backoff(self):
@@ -171,42 +209,44 @@ class ELKSender(threading.Thread):
         return False
 
     def _send(self, data_str):
-        # This encoding assumes a Logstash TCP input with a custom codec that
-        # reads a 4-byte length prefix. For a standard 'json_lines' codec,
-        # you would just send: `data_str.encode('utf-8') + b'\n'`
-        encoded_data = data_str.encode('utf-8')
-        self._sock.sendall(struct.pack('!I', len(encoded_data)) + encoded_data)
+        # PREVIOUSLY: It sent a 4-byte length prefix.
+        # encoded_data = data_str.encode('utf-8')
+        # self._sock.sendall(struct.pack('!I', len(encoded_data)) + encoded_data)
+
+        # NEW and CORRECTED: Send the data with a newline terminator.
+        encoded_data = data_str.encode('utf-8') + b'\n'
+        self._sock.sendall(encoded_data)
 
     def run(self):
         logger.info("ELK sender thread started.")
-        # The shutdown logic is key: process until shutdown is signaled AND the queue is empty.
         while not shutdown_event.is_set() or not self._queue.empty():
             try:
                 message = self._queue.get(timeout=1)
             except queue.Empty:
                 self._check_heartbeat()
-                continue # Go back to the top of the loop to re-check shutdown_event
+                continue
 
             sent = False
             while not sent and not shutdown_event.is_set():
                 try:
                     if self._sock is None:
                         if not self._connect_with_backoff():
-                            break # Shutdown was signaled during connection attempts
+                            break # Shutdown signaled
                     self._send(message)
-                    self._lines_processed += 1
+                    logger.debug(f"Successfully sent alert to ELK: {message[:100]}...")
+                    self._lines_processed_period += 1
                     self._queue.task_done()
                     sent = True
                 except (socket.error, OSError) as e:
-                    logger.error(f"Send error: {e}. Marking as disconnected.")
+                    logger.error(f"Send error to {self._host}:{self._port}: {e}. Marking as disconnected.")
                     send_telegram_message(f"❌ *Connection Lost:* Failed to send data. Will retry automatically.")
                     if self._sock: self._sock.close()
                     self._sock = None
 
-            if not sent: # This happens if shutdown was signaled mid-send
+            if not sent: # Happens if shutdown was signaled mid-send attempt
                 logger.warning(f"Could not send message due to shutdown. Re-queueing.")
-                self._queue.put(message) # Put it back
-                break # Exit the main while loop
+                self._queue.put(message)
+                break
 
             self._check_heartbeat()
 
@@ -216,16 +256,25 @@ class ELKSender(threading.Thread):
     def _check_heartbeat(self):
         if time.time() - self._last_heartbeat_time > HEARTBEAT_INTERVAL:
             q_size = self._queue.qsize()
-            message = f"❤️ *Heartbeat:* Service is alive. {self._lines_processed} alerts forwarded in the last period. Queue size: {q_size}."
+            message = f"❤️ *Heartbeat:* Service is alive. {self._lines_processed_period} alerts forwarded in the last period. Queue size: {q_size}."
             send_telegram_message(message)
             logger.info(message)
-            self._lines_processed = 0
+            self._lines_processed_period = 0
             self._last_heartbeat_time = time.time()
 
 # --- Main Execution & Signal Handling ---
 def main():
-    logger.info("🚀 Service starting up...")
-    send_telegram_message("🚀 *Wazuh Forwarder starting*")
+    logger.info("==============================================")
+    logger.info("      Wazuh Alert Forwarder Service")
+    logger.info("==============================================")
+    logger.info(f"Monitoring Wazuh alerts file: {WAZUH_ALERTS_FILE}")
+    logger.info(f"Forwarding to ELK server at: {ELK_HOST}:{ELK_PORT}")
+    logger.info(f"Logging to: {LOG_FILE}")
+    logger.info(f"State persistence file: {STATE_FILE}")
+    logger.info(f"Telegram monitoring enabled: {ENABLE_TELEGRAM}")
+    logger.info("----------------------------------------------")
+
+    send_telegram_message("🚀 Wazuh Forwarder is starting up...")
 
     message_queue = queue.Queue(maxsize=MAX_QUEUE_SIZE)
     state_manager = StateManager(STATE_FILE)
@@ -236,9 +285,6 @@ def main():
     reader.start()
     sender.start()
 
-    # Wait for threads to complete. They will only complete upon shutdown.
-    # The join() timeout allows the main thread to periodically wake up,
-    # which is necessary for the signal handler to be processed.
     while reader.is_alive() and sender.is_alive():
         reader.join(timeout=0.5)
         sender.join(timeout=0.5)
@@ -249,19 +295,21 @@ def main():
         logger.warning(f"{remaining_items} items remained in queue and were not sent.")
         send_telegram_message(f"⚠️ *Shutdown Complete:* Service stopped with {remaining_items} items left unsent in the queue.")
     else:
+        logger.info("Service stopped gracefully with an empty queue.")
         send_telegram_message("✅ *Shutdown Complete:* Service stopped gracefully.")
 
 def signal_handler(signum, frame):
     """Gracefully handles shutdown signals from systemd or Ctrl+C."""
-    logger.warning(f"Shutdown signal {signum} received. Initiating graceful shutdown.")
-    send_telegram_message("🛑 *Shutdown Signal Received*... Draining queue before exiting.")
+    if shutdown_event.is_set():
+        logger.warning("Shutdown already in progress.")
+        return
+    logger.warning(f"Shutdown signal {signum} received. Draining queue before exiting...")
+    send_telegram_message("🛑 Shutdown Signal Received... Draining queue before exiting.")
     shutdown_event.set()
 
 if __name__ == "__main__":
-    # Register the signal handler for SIGINT (Ctrl+C) and SIGTERM (standard service stop)
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-
     try:
         main()
     except Exception as e:
