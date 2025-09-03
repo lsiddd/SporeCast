@@ -135,6 +135,10 @@ services:
       - XPACK_SECURITY_ENCRYPTIONKEY=replace_with_a_secure_random_string_32_chars
       - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=replace_with_another_secure_random_string_32_chars
       - XPACK_REPORTING_ENCRYPTIONKEY=replace_with_a_third_secure_random_string_32_chars
+      # In server/docker-compose.yml, under kibana > environment:
+      - SERVER_SSL_ENABLED=true
+      - SERVER_SSL_CERTIFICATE=/usr/share/kibana/config/certs/elasticsearch/elasticsearch.crt
+      - SERVER_SSL_KEY=/usr/share/kibana/config/certs/elasticsearch/elasticsearch.key
     depends_on:
       kibana-setup:
         condition: service_completed_successfully
