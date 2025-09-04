@@ -40,7 +40,7 @@ async fn main() -> Result<()> {
                 message
             ))
         })
-        .level(LevelFilter::Debug)
+        .level(LevelFilter::Off)
         .chain(io::stdout());
 
     match log_file_result {

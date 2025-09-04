@@ -32,18 +32,12 @@ pub async fn palo_alto_syslog_receiver_thread(
     shutdown: Arc<AtomicBool>,
 ) -> Result<()> {
     let bind_addr = format!("0.0.0.0:{}", PALO_ALTO_SYSLOG_PORT);
-    info!(
-        "Starting Palo Alto syslog receiver on UDP port {}",
-        PALO_ALTO_SYSLOG_PORT
-    );
+    info!("Starting Palo Alto syslog receiver on UDP port {}", PALO_ALTO_SYSLOG_PORT);
 
     let socket = UdpSocket::bind(&bind_addr)
         .await
         .context(format!("Failed to bind UDP socket to {}", bind_addr))?;
-
     info!("Palo Alto syslog receiver successfully bound to {}", bind_addr);
-
-    info!("Palo Alto Log Forwarder Started: Listening for logs on UDP port {}.", PALO_ALTO_SYSLOG_PORT);
 
     let mut buffer = [0; 8192];
     let mut log_count = 0u64;
@@ -59,7 +53,7 @@ pub async fn palo_alto_syslog_receiver_thread(
                     info!("Processed {} Palo Alto logs so far", log_count);
                 }
 
-                let queue_high_load = QUEUE_MONITOR.check_queue_health(
+                QUEUE_MONITOR.check_queue_health(
                     raw_log_tx.len(), 
                     MAX_RECEIVER_QUEUE_SIZE, 
                     "raw_log_queue"
@@ -68,24 +62,9 @@ pub async fn palo_alto_syslog_receiver_thread(
                 let mut log_string = STRING_POOL.get_string();
                 log_string.push_str(&raw_message);
                 
-                if queue_high_load {
-                    if let Err(e) = raw_log_tx.send(log_string.clone()) {
-                        warn!("Failed to send raw log to enrichment queue: {}", e);
-                    }
-                } else {
-                    if let Err(e) = raw_log_tx.try_send(log_string.clone()) {
-                        warn!("Failed to send raw log to enrichment queue: {}. Queue may be full.", e);
-                    }
+                if let Err(e) = raw_log_tx.try_send(log_string.clone()) {
+                    warn!("Failed to send raw log to enrichment queue: {}. Queue may be full.", e);
                 }
-
-                // --- MODIFICATION START: Raw log forwarding disabled ---
-                // The following block is commented out to prevent sending raw, unenriched logs to Wazuh.
-                /*
-                if let Err(e) = wazuh_raw_tx.try_send(log_string.clone()) {
-                    warn!("Failed to send raw log to Wazuh queue: {}. Queue may be full.", e);
-                }
-                */
-                // --- MODIFICATION END ---
                 
                 STRING_POOL.return_string(log_string);
             }
@@ -127,7 +106,6 @@ pub fn palo_alto_enrichment_worker_thread(
                 processed_count += 1;
                 debug!("[Worker {}] Processing raw log #{}: {}", worker_id, processed_count, raw_log);
 
-                // Directly call the now-synchronous parsing function
                 match parse_palo_alto_log_to_json(&raw_log) {
                     Ok(mut parsed_log) => {
                         debug!("[Worker {}] Successfully parsed Palo Alto log", worker_id);
@@ -147,11 +125,9 @@ pub fn palo_alto_enrichment_worker_thread(
                         } else {
                             debug!("[Worker {}] Skipping behavioral analysis due to high load", worker_id);
                         }
-
-                        if let Err(e) = elk_tx.try_send(parsed_log.clone()) {
-                            warn!("[Worker {}] Failed to send enriched log to sender queue: {}. Queue may be full.", worker_id, e);
-                        }
-
+                        
+                        // MODIFIED: Reordered operations to avoid cloning `parsed_log`.
+                        // 1. Format for Wazuh using a reference to the log.
                         match format_json_to_palo_alto_syslog(&parsed_log) {
                             Ok(formatted_syslog) => {
                                 if let Err(e) = wazuh_enriched_tx.try_send(formatted_syslog) {
@@ -161,6 +137,11 @@ pub fn palo_alto_enrichment_worker_thread(
                             Err(e) => {
                                 warn!("[Worker {}] Failed to format JSON back to syslog for Wazuh: {}", worker_id, e);
                             }
+                        }
+
+                        // 2. Send the original `parsed_log` to ELK, consuming it (no clone).
+                        if let Err(e) = elk_tx.try_send(parsed_log) {
+                            warn!("[Worker {}] Failed to send enriched log to sender queue: {}. Queue may be full.", worker_id, e);
                         }
                     }
                     Err(e) => {
@@ -316,7 +297,6 @@ pub async fn wazuh_raw_syslog_sender_thread(
                     Ok(Ok(_)) => {
                         sent_count += 1;
                         circuit_breaker.record_success();
-                        debug!("Sent raw log to Wazuh. Total: {}", sent_count);
                     }
                     Ok(Err(e)) => {
                         failed_count += 1;
@@ -331,7 +311,6 @@ pub async fn wazuh_raw_syslog_sender_thread(
                 }
             }
             Err(_) => {
-                debug!("Wazuh raw sender timeout, checking shutdown");
                 if wazuh_raw_rx.is_empty() && shutdown.load(Ordering::Relaxed) {
                     break;
                 }
@@ -375,8 +354,6 @@ pub async fn wazuh_enriched_syslog_sender_thread(
                     Ok(Ok(_)) => {
                         sent_count += 1;
                         circuit_breaker.record_success();
-                        debug!("Sent enriched log to Wazuh. Total: {}", sent_count);
-
                         if sent_count % 100 == 0 {
                             info!("Sent {} enriched logs to Wazuh", sent_count);
                         }
@@ -394,7 +371,6 @@ pub async fn wazuh_enriched_syslog_sender_thread(
                 }
             }
             Err(_) => {
-                debug!("Wazuh enriched sender timeout, checking shutdown");
                 if wazuh_enriched_rx.is_empty() && shutdown.load(Ordering::Relaxed) {
                     break;
                 }
@@ -438,7 +414,6 @@ pub fn state_merger_thread(
                 }
             }
             Err(_) => {
-                debug!("State merger timeout, checking shutdown");
                 if state_merger_rx.is_empty() && shutdown.load(Ordering::Relaxed) {
                     break;
                 }

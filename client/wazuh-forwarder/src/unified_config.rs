@@ -15,9 +15,9 @@ pub const SOCKET_TIMEOUT_SECS: u64 = 10;
 pub const HEARTBEAT_INTERVAL_SECS: u64 = 3600;
 
 // --- Performance Configuration ---
-pub const MAX_RECEIVER_QUEUE_SIZE: usize = 500000;  // Increased 10x for high throughput
-pub const MAX_ENRICHMENT_QUEUE_SIZE: usize = 400000; // Increased 10x for high throughput
-pub const MAX_WAZUH_QUEUE_SIZE: usize = 400000;      // Increased 10x for high throughput
+pub const MAX_RECEIVER_QUEUE_SIZE: usize = 250_000;  // Increased 10x for high throughput
+pub const MAX_ENRICHMENT_QUEUE_SIZE: usize = 200_000; // Increased 10x for high throughput
+pub const MAX_WAZUH_QUEUE_SIZE: usize = 200_000;      // Increased 10x for high throughput
 pub const ENRICHMENT_WORKER_COUNT: usize = 16;       // Doubled for better parallelism
 pub const ELK_BATCH_SIZE: usize = 5000;              // Increased batch size for efficiency
 pub const ELK_BATCH_FLUSH_INTERVAL_SECS: u64 = 2;    // Slightly increased flush interval

@@ -138,7 +138,8 @@ pub fn parse_palo_alto_log_to_json(raw_log: &str) -> Result<Value> {
     }
 
     // Add metadata
-    json_map.insert("palo_alto_raw_log".to_string(), Value::String(raw_log.to_string()));
+    // REMOVED: The following line was removed to prevent duplicating the entire log message in memory.
+    // json_map.insert("palo_alto_raw_log".to_string(), Value::String(raw_log.to_string()));
     json_map.insert("@timestamp".to_string(), Value::String(Utc::now().to_rfc3339()));
     json_map.insert("log_source".to_string(), Value::String("palo_alto".to_string()));
 
@@ -303,19 +304,18 @@ pub fn extract_iocs(log_data: &Value) -> HashMap<&'static str, Vec<String>> {
 // Main function for enriching and analyzing a single log.
 pub fn enrich_and_analyze_log(
     mut log_data: Value,
-    intel: &Arc<ThreatIntel>, // Changed to Arc<ThreatIntel>
+    intel: &Arc<ThreatIntel>,
     state: &mut AlertHistory,
 ) -> Value {
     debug!("Starting enrichment and analysis for log.");
-    let iocs = extract_iocs(&log_data); // Extract IOCs from the current log.
-    let mut enrichment_data = json!({}); // Accumulates all enrichment findings.
-    let mut found_enrichment = false; // Flag to track if any enrichment occurred.
+    let iocs = extract_iocs(&log_data);
+    let mut enrichment_data = json!({});
+    let mut found_enrichment = false;
 
     // --- 1. Threat Intelligence IOC Matching ---
-    let mut ioc_matches = json!({}); // Stores specific IOC matches.
-    let mut found_ioc_match = false; // Flag for IOC matches.
+    let mut ioc_matches = json!({});
+    let mut found_ioc_match = false;
 
-    // IP Reputation Check: Checks extracted IPs against the malicious IP database.
     if let Some(ips) = iocs.get("ip") {
         let mut malicious_ip_hits = Vec::new();
         for ip in ips {
@@ -334,29 +334,18 @@ pub fn enrich_and_analyze_log(
         if !malicious_ip_hits.is_empty() {
             ioc_matches["malicious_ips"] = Value::Array(malicious_ip_hits);
             found_ioc_match = true;
-        } else {
-            debug!("No IP addresses extracted for IOC check.");
         }
     }
 
-    // Domain, Hash, and URL checks: Checks extracted domains, hashes, and URLs against their respective databases.
     if let Some(domains) = iocs.get("domain") {
         let hits: Vec<_> = domains
             .iter()
             .filter(|d| intel.malicious_domains.contains(*d))
             .collect();
         if !hits.is_empty() {
-            info!(
-                "Threat Intel Match: Malicious domain(s) detected: {:?}",
-                hits
-            );
+            info!("Threat Intel Match: Malicious domain(s) detected: {:?}", hits);
             ioc_matches["malicious_domains"] = json!(hits);
             found_ioc_match = true;
-        } else {
-            debug!(
-                "No malicious domains found among extracted domains: {:?}",
-                domains
-            );
         }
     }
     if let Some(hashes) = iocs.get("hash") {
@@ -365,17 +354,9 @@ pub fn enrich_and_analyze_log(
             .filter(|h| intel.malicious_hashes.contains(*h))
             .collect();
         if !hits.is_empty() {
-            info!(
-                "Threat Intel Match: Malicious hash(es) detected: {:?}",
-                hits
-            );
+            info!("Threat Intel Match: Malicious hash(es) detected: {:?}", hits);
             ioc_matches["malicious_hashes"] = json!(hits);
             found_ioc_match = true;
-        } else {
-            debug!(
-                "No malicious hashes found among extracted hashes: {:?}",
-                hashes
-            );
         }
     }
     if let Some(urls) = iocs.get("url") {
@@ -387,26 +368,19 @@ pub fn enrich_and_analyze_log(
             info!("Threat Intel Match: Malicious URL(s) detected: {:?}", hits);
             ioc_matches["malicious_urls"] = json!(hits);
             found_ioc_match = true;
-        } else {
-            debug!("No malicious URLs found among extracted URLs: {:?}", urls);
         }
     }
 
     if found_ioc_match {
         enrichment_data["ioc_matches"] = ioc_matches;
         found_enrichment = true;
-        debug!("IOC matches added to enrichment data.");
-    } else {
-        debug!("No IOC matches found for this log.");
     }
 
     // --- 2. Other Threat Hunting Detections ---
-    let mut hunt_detections = json!({}); // Stores custom threat hunting findings.
-    let mut found_hunt_detection = false; // Flag for custom hunt detections.
+    let mut hunt_detections = json!({});
+    let mut found_hunt_detection = false;
 
-    // Suspicious Patterns: Looks for specific regex patterns within any string field.
     let mut suspicious_patterns_found = Vec::new();
-
     let check_suspicious_patterns =
         |value: &Value, path: String, f: &mut dyn FnMut(&str, &str, &str)| {
             fn inner(
@@ -418,11 +392,7 @@ pub fn enrich_and_analyze_log(
                 match value {
                     Value::Object(map) => {
                         for (key, val) in map {
-                            let new_path = if path.is_empty() {
-                                key.clone()
-                            } else {
-                                format!("{}.{}", path, key)
-                            };
+                            let new_path = if path.is_empty() { key.clone() } else { format!("{}.{}", path, key) };
                             inner(val, new_path, compiled_patterns, f);
                         }
                     }
@@ -442,16 +412,10 @@ pub fn enrich_and_analyze_log(
                     _ => {}
                 }
             }
-            inner(value, path, &SUSPICIOUS_PATTERNS_COMPILED, f); // Use pre-compiled patterns
+            inner(value, path, &SUSPICIOUS_PATTERNS_COMPILED, f);
         };
-
     let mut collect_suspicious = |name: &str, path: &str, s: &str| {
-        warn!(
-            "Threat Hunt: Suspicious pattern '{}' found in field '{}'. Sample: '{}'.",
-            name,
-            path,
-            s.chars().take(100).collect::<String>()
-        );
+        warn!("Threat Hunt: Suspicious pattern '{}' found in field '{}'.", name, path);
         suspicious_patterns_found.push(json!({"pattern": name, "field_path": path, "sample": s.chars().take(100).collect::<String>()}));
         found_hunt_detection = true;
     };
@@ -460,132 +424,68 @@ pub fn enrich_and_analyze_log(
     if !suspicious_patterns_found.is_empty() {
         hunt_detections["suspicious_patterns"] = Value::Array(suspicious_patterns_found);
         found_hunt_detection = true;
-        debug!("Suspicious patterns added to threat hunting data.");
-    } else {
-        debug!("No suspicious patterns found in log.");
     }
 
-    // Suspicious Processes: Checks for known suspicious process names in relevant log fields.
-    if let Some(cmd) = log_data
-        .get("msg")
-        .or_else(|| log_data.get("eventdescription"))
-        .and_then(Value::as_str)
-    {
-        debug!(
-            "Checking for suspicious processes in command/message: {}",
-            cmd
-        );
-        let lower_cmd = cmd.to_lowercase(); // Convert once
+    if let Some(cmd) = log_data.get("msg").or_else(|| log_data.get("eventdescription")).and_then(Value::as_str) {
+        let lower_cmd = cmd.to_lowercase();
         for process in SUSPICIOUS_PROCESSES.iter() {
             if lower_cmd.contains(process) {
-                warn!(
-                    "Threat Hunt: Suspicious process keyword '{}' detected in log.",
-                    process
-                );
+                warn!("Threat Hunt: Suspicious process keyword '{}' detected.", process);
                 hunt_detections["suspicious_process"] = json!(process);
                 found_hunt_detection = true;
-                break; // Only need to find one match.
+                break;
             }
         }
-    } else {
-        debug!("No command line or event description field found for suspicious process check.");
     }
-
-    // Critical Asset Access: Checks for keywords indicating access to predefined critical assets.
-    if let Some(desc) = log_data
-        .get("msg")
-        .or_else(|| log_data.get("logdesc"))
-        .and_then(Value::as_str)
-    {
-        debug!(
-            "Checking for critical asset access in message/log description: {}",
-            desc
-        );
-        let lower_desc = desc.to_lowercase(); // Convert once
+    
+    if let Some(desc) = log_data.get("msg").or_else(|| log_data.get("logdesc")).and_then(Value::as_str) {
+        let lower_desc = desc.to_lowercase();
         for asset in CRITICAL_ASSETS.iter() {
             if lower_desc.contains(asset) {
-                warn!(
-                    "Threat Hunt: Critical asset access keyword '{}' detected in log.",
-                    asset
-                );
+                warn!("Threat Hunt: Critical asset access keyword '{}' detected.", asset);
                 hunt_detections["critical_asset_access"] = json!(asset);
                 found_hunt_detection = true;
                 break;
             }
         }
-    } else {
-        debug!("No message or log description field found for critical asset access check.");
     }
 
-    // Correlation Rules: Applies custom correlation rules (simple regex matches) to log descriptions.
-    if let Some(desc) = log_data
-        .get("msg")
-        .or_else(|| log_data.get("logdesc"))
-        .and_then(Value::as_str)
-    {
-        debug!(
-            "Checking correlation rules against message/log description: {}",
-            desc
-        );
+    if let Some(desc) = log_data.get("msg").or_else(|| log_data.get("logdesc")).and_then(Value::as_str) {
         let mut matches = Vec::new();
         for (name, re) in CORRELATION_RULES_COMPILED.iter() {
-            // Use pre-compiled regexes
             if re.is_match(desc) {
-                info!(
-                    "Threat Hunt: Correlation rule '{}' matched with pattern '{}'.",
-                    name,
-                    re.as_str()
-                );
+                info!("Threat Hunt: Correlation rule '{}' matched.", name);
                 matches.push(json!({ "rule": name, "pattern": re.as_str() }));
             }
         }
         if !matches.is_empty() {
             hunt_detections["correlation_rules"] = Value::Array(matches);
             found_hunt_detection = true;
-            debug!("Correlation rule matches added to threat hunting data.");
         }
-    } else {
-        debug!("No message or log description field found for correlation rules check.");
     }
 
     if found_hunt_detection {
         enrichment_data["threat_hunting"] = hunt_detections;
         found_enrichment = true;
-        debug!("Threat hunting detections added to enrichment data.");
-    } else {
-        debug!("No custom threat hunting detections found for this log.");
     }
 
     // --- 3. Behavioral Analysis ---
     if ENABLE_BEHAVIORAL_ANALYSIS {
-        debug!("Performing behavioral analysis.");
-        // Update the state with the current log's details *before* checking for anomalies
-        // for this log, so that this log contributes to the history for *future* anomaly checks.
         state.update(&log_data);
         if let Some(anomalies) = state.is_suspicious_activity(&log_data) {
             warn!("Behavioral anomalies detected: {:?}", anomalies);
             enrichment_data["behavioral_anomalies"] = anomalies;
             found_enrichment = true;
-            debug!("Behavioral anomalies added to enrichment data.");
-        } else {
-            debug!("No behavioral anomalies detected for this log.");
         }
-    } else {
-        info!("Behavioral analysis is disabled by configuration.");
     }
 
-    // Add all aggregated enrichment data to the original log data under a specific key.
+    // Add all aggregated enrichment data to the original log data.
     if found_enrichment {
         if let Some(obj) = log_data.as_object_mut() {
-            // Add the last update time of the intel feeds for context.
             enrichment_data["intel_last_updated"] = json!(intel.last_updated.to_rfc3339());
             obj.insert("forwarder_enrichment".to_string(), enrichment_data);
-            info!("Log successfully enriched with forwarder_enrichment data.");
-        } else {
-            warn!("Could not add enrichment data: Log data is not a JSON object.");
+            info!("Log successfully enriched.");
         }
-    } else {
-        debug!("Log not enriched, no matches or anomalies found.");
     }
-    log_data // Return the modified Value
+    log_data
 }
