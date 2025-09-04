@@ -13,3 +13,4 @@ pub const ELK_HOST: &str = "127.0.0.1"; // Logstash server IP for Palo Alto logs
 pub const ELK_PORT: u16 = 5142; // TCP port for Logstash (different from Fortigate to avoid conflicts)
 pub const LOG_FILE: &str = "/var/log/palo_alto_forwarder.log"; // Palo Alto forwarder log file
 pub const STATE_FILE: &str = "/var/lib/palo-alto-forwarder/forwarder_state.json"; // State persistence file
+pub const NO_LOG_FILE: bool = true; // Disable log file writes when set to true

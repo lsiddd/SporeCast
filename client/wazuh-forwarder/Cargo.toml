@@ -30,3 +30,4 @@ toml = "0.8" # Added for configuration file parsing
 parking_lot = "0.12" # High-performance mutex for memory pool
 dashmap = "5.5" # Concurrent hashmap for circuit breakers
 once_cell = "1.19" # For static initialization of memory pool
+lru = "0.16.0"

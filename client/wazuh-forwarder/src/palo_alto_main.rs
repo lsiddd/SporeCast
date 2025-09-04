@@ -29,8 +29,7 @@ use wazuh_forwarder::{
 #[tokio::main]
 async fn main() -> Result<()> {
     // Logging Setup
-    let log_file_result = OpenOptions::new().create(true).append(true).open(LOG_FILE);
-    let fern_dispatch = fern::Dispatch::new()
+    let mut fern_dispatch = fern::Dispatch::new()
         .format(|out, message, record| {
             out.finish(format_args!(
                 "{} - {} - {} - {}",
@@ -43,16 +42,23 @@ async fn main() -> Result<()> {
         .level(LevelFilter::Off)
         .chain(io::stdout());
 
-    match log_file_result {
-        Ok(file) => {
-            fern_dispatch.chain(file).apply()?;
-            info!("Logging configured. Detailed logs will be written to {}.", LOG_FILE);
+    if NO_LOG_FILE {
+        fern_dispatch.apply()?;
+        info!("Logging configured for stdout only (log file writes disabled).");
+    } else {
+        let log_file_result = OpenOptions::new().create(true).append(true).open(LOG_FILE);
+        match log_file_result {
+            Ok(file) => {
+                fern_dispatch = fern_dispatch.chain(file);
+                fern_dispatch.apply()?;
+                info!("Logging configured. Detailed logs will be written to {}.", LOG_FILE);
+            }
+            Err(e) => {
+                eprintln!("Failed to open log file {}: {}. Logging will only go to stdout.", LOG_FILE, e);
+                fern_dispatch.apply()?;
+            }
         }
-        Err(e) => {
-            eprintln!("Failed to open log file {}: {}. Logging will only go to stdout.", LOG_FILE, e);
-            fern_dispatch.apply()?;
-        }
-    };
+    }
 
     info!("==============================================");
     info!("     Palo Alto Raw Log Forwarder (Rust)     ");
