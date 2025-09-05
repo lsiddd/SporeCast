@@ -238,11 +238,18 @@ fn enrich_alert_with_reputation(alert: &mut Value, blocklists: &HashMap<String, 
         let found_in_lists = check_ip_reputation(&ip_str, blocklists);
         if !found_in_lists.is_empty() {
             info!("Found blocklisted IP {} in field path '{}'", ip_str, path);
+            
+            // Extract base names from URLs
+            let list_names: Vec<&str> = found_in_lists.iter()
+                .map(|url| url.split('/').last().unwrap_or(url))
+                .collect();
+            
             let reputation_entry = serde_json::json!({
                 "ip": ip_str,
                 "original_field_path": path,
                 "status": "blocklisted",
-                "source_lists": found_in_lists,
+                "blocklist_count": found_in_lists.len(),  // Number of blocklists
+                "blocklist_names": list_names,            // Names of blocklists
             });
             reputation_results.push(reputation_entry);
         }
