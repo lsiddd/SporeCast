@@ -30,7 +30,7 @@ use std::{
 // ==============================================================================
 const WAZUH_ALERTS_FILE: &str = "/var/ossec/logs/alerts/alerts.json";
 const ELK_HOST: &str = "68.168.216.248";
-const ELK_PORT: u16 = 5142;
+const ELK_PORT: u16 = 5140;
 const SOCKET_TIMEOUT: u64 = 10;
 const LOG_FILE: &str = "/var/log/wazuh_forwarder.log";
 const STATE_FILE: &str = "/var/lib/wazuh-forwarder/forwarder_state.json";
@@ -43,6 +43,7 @@ const HEARTBEAT_INTERVAL: u64 = 3600;
 const ENABLE_IP_REPUTATION: bool = true;
 const CACHE_DIR: &str = "/var/lib/wazuh-forwarder/blocklist_cache";
 const REFRESH_INTERVAL: u64 = 86400;
+const PROCESS_FROM_BEGINNING_ON_FIRST_RUN: bool = true;
 const BLOCKLIST_URLS: [&str; 12] = [
     "https://lists.blocklist.de/lists/all.txt",
     "https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level1.netset",
@@ -216,76 +217,74 @@ fn check_ip_reputation(ip_address: &str, blocklists: &HashMap<String, HashSet<St
 
 fn is_public_ip(ip_str: &str) -> bool {
     if let Ok(ip) = ip_str.parse::<Ipv4Addr>() {
-        !ip.is_private() && !ip.is_loopback() && !ip.is_unspecified()
+        !ip.is_private() && !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast() && !ip.is_documentation()
     } else {
         false
     }
 }
 
-fn enrich_ips_recursively(value: &mut Value, blocklists: &HashMap<String, HashSet<String>>) {
+fn enrich_alert_with_reputation(alert: &mut Value, blocklists: &HashMap<String, HashSet<String>>) {
+    let mut all_ips_with_paths: Vec<(String, String)> = Vec::new();
+    find_ips_in_value(alert, String::new(), &mut all_ips_with_paths);
+
+    let mut reputation_results: Vec<Value> = Vec::new();
+    let mut seen_ips = HashSet::new();
+
+    for (ip_str, path) in all_ips_with_paths {
+        if !is_public_ip(&ip_str) || !seen_ips.insert(ip_str.clone()) {
+            continue;
+        }
+
+        let found_in_lists = check_ip_reputation(&ip_str, blocklists);
+        if !found_in_lists.is_empty() {
+            info!("Found blocklisted IP {} in field path '{}'", ip_str, path);
+            let reputation_entry = serde_json::json!({
+                "ip": ip_str,
+                "original_field_path": path,
+                "status": "blocklisted",
+                "source_lists": found_in_lists,
+            });
+            reputation_results.push(reputation_entry);
+        }
+    }
+
+    if !reputation_results.is_empty() {
+        if let Some(obj) = alert.as_object_mut() {
+            obj.insert(
+                "ip_reputation".to_string(),
+                Value::Array(reputation_results),
+            );
+        }
+    }
+}
+
+fn find_ips_in_value(value: &Value, current_path: String, found_ips: &mut Vec<(String, String)>) {
     match value {
         Value::Object(map) => {
-            // First recursively process all values
-            for val in map.values_mut() {
-                enrich_ips_recursively(val, blocklists);
-            }
-
-            // Collect keys to avoid borrowing issues
-            let keys: Vec<String> = map.keys().cloned().collect();
-            let mut reputation_inserts = Vec::new();
-
-            for key in keys {
-                if let Some(Value::String(s)) = map.get(&key) {
-                    let ips: Vec<_> = IP_REGEX
-                        .find_iter(s)
-                        .map(|m| m.as_str())
-                        .filter(|ip| is_public_ip(ip))
-                        .collect();
-
-                    if ips.is_empty() {
-                        continue;
-                    }
-
-                    let mut reputation_data = serde_json::Map::new();
-                    for ip in ips {
-                        let found_in_lists = check_ip_reputation(ip, blocklists);
-                        if !found_in_lists.is_empty() {
-                            info!("Found blocklisted IP {} in field '{}'", ip, key);
-                            let mut ip_data = serde_json::Map::new();
-                            ip_data.insert("status".to_string(), Value::String("blocklisted".to_string()));
-                            ip_data.insert(
-                                "source_lists".to_string(),
-                                Value::Array(
-                                    found_in_lists
-                                        .into_iter()
-                                        .map(Value::String)
-                                        .collect(),
-                                ),
-                            );
-                            reputation_data.insert(ip.to_string(), Value::Object(ip_data));
-                        }
-                    }
-
-                    if !reputation_data.is_empty() {
-                        reputation_inserts.push((key.clone(), reputation_data));
-                    }
-                }
-            }
-
-            // Insert new reputation fields
-            for (key, reputation_data) in reputation_inserts {
-                let new_field_name = format!("{}_reputation", key);
-                map.insert(new_field_name, Value::Object(reputation_data));
+            for (key, val) in map.iter() {
+                let new_path = if current_path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{}.{}", current_path, key)
+                };
+                find_ips_in_value(val, new_path, found_ips);
             }
         }
         Value::Array(arr) => {
-            for val in arr.iter_mut() {
-                enrich_ips_recursively(val, blocklists);
+            for (index, val) in arr.iter().enumerate() {
+                let new_path = format!("{}[{}]", current_path, index);
+                find_ips_in_value(val, new_path, found_ips);
+            }
+        }
+        Value::String(s) => {
+            for mat in IP_REGEX.find_iter(s) {
+                found_ips.push((mat.as_str().to_string(), current_path.clone()));
             }
         }
         _ => {}
     }
 }
+
 
 // ==============================================================================
 // --- File Reader Thread ---
@@ -300,14 +299,21 @@ fn file_reader_thread(
     info!("File reader thread started.");
     let mut line_buffer = String::new();
 
-    // Handle first run logic
     if state_manager.state.inode.is_none() && Path::new(alert_file).exists() {
-        warn!("First run with existing log file. Starting from the END to process new entries only.");
-        send_telegram_message("ℹ️ First run: Starting from end of log file, ignoring historical data.");
-        let metadata = fs::metadata(alert_file)?;
-        state_manager.state.inode = Some(metadata.ino());
-        state_manager.state.offset = metadata.size();
-        state_manager.save()?;
+        if PROCESS_FROM_BEGINNING_ON_FIRST_RUN {
+            warn!("First run: Flag is set to true. Reading alerts from the BEGINNING of the file.");
+            send_telegram_message("ℹ️ First run: Starting from BEGINNING of log file, processing all historical data.");
+            let metadata = fs::metadata(alert_file)?;
+            state_manager.state.inode = Some(metadata.ino());
+            state_manager.save()?;
+        } else {
+            warn!("First run with existing log file. Starting from the END to process new entries only.");
+            send_telegram_message("ℹ️ First run: Starting from END of log file, ignoring historical data.");
+            let metadata = fs::metadata(alert_file)?;
+            state_manager.state.inode = Some(metadata.ino());
+            state_manager.state.offset = metadata.size();
+            state_manager.save()?;
+        }
     }
 
     while !shutdown.load(Ordering::Relaxed) {
@@ -320,7 +326,6 @@ fn file_reader_thread(
         let current_inode = state_manager.state.inode;
         let mut offset = state_manager.state.offset;
 
-        // Handle file rotation
         if current_inode.is_none() || metadata.ino() != current_inode.unwrap() {
             info!("New log file or rotation detected. Resetting to start of new file.");
             state_manager.state.inode = Some(metadata.ino());
@@ -329,7 +334,6 @@ fn file_reader_thread(
             line_buffer.clear();
         }
 
-        // Handle file truncation
         if metadata.size() < offset {
             warn!("Log file truncated. Resetting offset from {} to 0.", offset);
             state_manager.state.offset = 0;
@@ -366,7 +370,7 @@ fn file_reader_thread(
                         Ok(mut alert_json) => {
                             if ENABLE_IP_REPUTATION {
                                 let blocklists = blocklists.lock().unwrap();
-                                enrich_ips_recursively(&mut alert_json, &blocklists);
+                                enrich_alert_with_reputation(&mut alert_json, &blocklists);
                             }
                             let enriched_line = serde_json::to_string(&alert_json)?;
                             if sender.send(enriched_line).is_err() {
@@ -410,7 +414,6 @@ fn elk_sender_thread(
     let mut lines_processed = 0;
     let mut stream = None;
 
-    // Initial connection
     match TcpStream::connect_timeout(&addr, Duration::from_secs(SOCKET_TIMEOUT)) {
         Ok(s) => {
             info!("Successfully connected to ELK at {}:{}", ELK_HOST, ELK_PORT);
@@ -423,7 +426,6 @@ fn elk_sender_thread(
     };
 
     while !shutdown.load(Ordering::Relaxed) || !receiver.is_empty() {
-        // Check for heartbeat
         if last_heartbeat.elapsed().as_secs() >= HEARTBEAT_INTERVAL {
             let message = format!(
                 "❤️ *Heartbeat:* Service is alive. {} alerts forwarded. Queue size: {}.",
@@ -436,7 +438,6 @@ fn elk_sender_thread(
             last_heartbeat = Instant::now();
         }
 
-        // Process messages
         match receiver.recv_timeout(Duration::from_secs(1)) {
             Ok(message) => {
                 let data = message + "\n";
@@ -510,7 +511,6 @@ fn blocklist_updater_thread(
             blocklists.lock().unwrap().len()
         ));
 
-        // Wait for refresh interval or shutdown
         for _ in 0..REFRESH_INTERVAL {
             if shutdown.load(Ordering::Relaxed) {
                 break;
@@ -548,7 +548,6 @@ fn test_initial_connection() -> Result<()> {
 // --- Main Function ---
 // ==============================================================================
 fn main() -> Result<()> {
-    // Setup logging
     let _log_file = match OpenOptions::new()
         .create(true)
         .append(true)
@@ -593,16 +592,13 @@ fn main() -> Result<()> {
     info!("==============================================");
     info!("Forwarding to ELK server at: {}:{}", ELK_HOST, ELK_PORT);
 
-    // Test initial connection
     if let Err(e) = test_initial_connection() {
         warn!("Proceeding despite connection failure: {}", e);
     }
 
-    // Setup shutdown flag
     let shutdown = Arc::new(AtomicBool::new(false));
     let _shutdown_clone = shutdown.clone();
 
-    // Setup signal handling
     let mut signals = Signals::new(&[SIGINT, SIGTERM])?;
     let signal_shutdown = shutdown.clone();
     thread::spawn(move || {
@@ -612,16 +608,13 @@ fn main() -> Result<()> {
         }
     });
 
-    // Create message channel
     let (tx, rx) = bounded(MAX_QUEUE_SIZE);
 
-    // Initialize state manager
     let mut state_manager = StateManager::new(STATE_FILE);
     if let Err(e) = state_manager.load() {
         error!("Failed to load state: {}", e);
     }
 
-    // Initialize blocklists
     let blocklists = Arc::new(Mutex::new(HashMap::new()));
     if ENABLE_IP_REPUTATION {
         let blocklists_clone = blocklists.clone();
@@ -631,7 +624,6 @@ fn main() -> Result<()> {
         });
     }
 
-    // Start file reader thread
     let file_reader_shutdown = shutdown.clone();
     let file_reader_tx = tx.clone();
     let file_reader_blocklists = blocklists.clone();
@@ -647,7 +639,6 @@ fn main() -> Result<()> {
         }
     });
 
-    // Start ELK sender thread
     let elk_sender_shutdown = shutdown.clone();
     let elk_sender_handle = thread::spawn(move || {
         if let Err(e) = elk_sender_thread(rx, elk_sender_shutdown) {
@@ -655,11 +646,9 @@ fn main() -> Result<()> {
         }
     });
 
-    // Wait for threads to finish
     file_reader_handle.join().unwrap();
     elk_sender_handle.join().unwrap();
 
-    // Final shutdown message
     info!("Service stopped gracefully.");
     send_telegram_message("✅ *Shutdown Complete:* Service stopped gracefully.");
 
