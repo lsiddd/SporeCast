@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   setup_certs:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.18.2
     volumes:
       - certs:/usr/share/elasticsearch/config/certs
     user: "0"
@@ -37,7 +37,7 @@ services:
       retries: 120
 
   elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.18.2
     container_name: elasticsearch
     depends_on:
       setup_certs:
@@ -62,15 +62,16 @@ services:
     ulimits:
       memlock: { soft: -1, hard: -1 }
       nofile: { soft: 65536, hard: 65536 }
+    # In the 'elasticsearch' service
     healthcheck:
       test:
         [
           "CMD-SHELL",
           "curl -s --cacert config/certs/ca/ca.crt -u elastic:${ELASTIC_PASSWORD} https://localhost:9200/_cluster/health | grep -E -q '\"status\":\"(green|yellow)\"'"
         ]
-      interval: 10s
+      interval: 15s
       timeout: 10s
-      retries: 5
+      retries: 12 # <-- Change this line
 
   kibana-setup:
     # Build the image from the Dockerfile in the kibana-setup directory
@@ -109,7 +110,7 @@ services:
       elasticsearch:
         condition: service_healthy
   kibana:
-    image: docker.elastic.co/kibana/kibana:8.13.4
+    image: docker.elastic.co/kibana/kibana:8.18.2
     container_name: kibana
     volumes:
       - certs:/usr/share/kibana/config/certs:ro
@@ -144,7 +145,7 @@ services:
         condition: service_completed_successfully
 
   logstash:
-    image: docker.elastic.co/logstash/logstash:8.13.4
+    image: docker.elastic.co/logstash/logstash:8.18.2
     container_name: logstash
     volumes:
       - ./logstash.conf:/usr/share/logstash/pipeline/logstash.conf:ro
