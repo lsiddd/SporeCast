@@ -1,5 +1,4 @@
-version: '3.8'
-
+# The 'version' tag is obsolete and can be safely removed.
 services:
   setup_certs:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.18.2
@@ -30,18 +29,13 @@ services:
         echo "Setting file permissions";
         chown -R 1000:0 config/certs;
       '
-    healthcheck:
-      test: ["CMD-SHELL", "cat config/certs/ca/ca.crt"]
-      interval: 1s
-      timeout: 5s
-      retries: 120
 
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.18.2
     container_name: elasticsearch
     depends_on:
       setup_certs:
-        condition: service_healthy
+        condition: service_completed_successfully
     environment:
       - discovery.type=single-node
       - ES_JAVA_OPTS=-Xms1g -Xmx1g
@@ -57,12 +51,12 @@ services:
       - xpack.security.transport.ssl.certificate_authorities=certs/ca/ca.crt
       - xpack.security.transport.ssl.verification_mode=certificate
     volumes:
-      - esdata:/usr/share/elasticsearch/data
+      # Bind mount for persistent Elasticsearch data on the host
+      - ./esdata:/usr/share/elasticsearch/data
       - certs:/usr/share/elasticsearch/config/certs
     ulimits:
       memlock: { soft: -1, hard: -1 }
       nofile: { soft: 65536, hard: 65536 }
-    # In the 'elasticsearch' service
     healthcheck:
       test:
         [
@@ -71,10 +65,9 @@ services:
         ]
       interval: 15s
       timeout: 10s
-      retries: 12 # <-- Change this line
+      retries: 12
 
   kibana-setup:
-    # Build the image from the Dockerfile in the kibana-setup directory
     build: ./kibana-setup
     container_name: kibana-setup
     user: "0"
@@ -94,7 +87,6 @@ services:
         curl -s -X POST --cacert /certs/ca/ca.crt -u elastic:${ELASTIC_PASSWORD} https://elasticsearch:9200/_security/service/elastic/kibana/credential/token > /token/kibana_token.json;
         
         echo "Extracting token with jq...";
-        # Use jq to reliably extract the token value. This is guaranteed to work.
         jq -r ".token.value" /token/kibana_token.json > /token/kibana.token;
         
         if [ -s /token/kibana.token ]; then
@@ -113,6 +105,8 @@ services:
     image: docker.elastic.co/kibana/kibana:8.18.2
     container_name: kibana
     volumes:
+      # MODIFIED: Changed to a bind mount for persistent Kibana data on the host.
+      - ./kibanadata:/usr/share/kibana/data
       - certs:/usr/share/kibana/config/certs:ro
       - kibana_token:/usr/share/kibana/config/token:ro
     command: >
@@ -121,7 +115,6 @@ services:
         while [ ! -f /usr/share/kibana/config/token/kibana.token ]; do
           sleep 2;
         done;
-        # Corrected environment variable name below
         export ELASTICSEARCH_SERVICEACCOUNTTOKEN=$(cat /usr/share/kibana/config/token/kibana.token);
         /usr/local/bin/kibana-docker
       '
@@ -131,12 +124,9 @@ services:
       - SERVER_HOST=0.0.0.0
       - ELASTICSEARCH_HOSTS=["https://elasticsearch:9200"]
       - ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES=/usr/share/kibana/config/certs/ca/ca.crt
-      # Add these encryption keys for a robust setup.
-      # Replace the placeholder values with your own securely generated random strings (at least 32 characters long).
       - XPACK_SECURITY_ENCRYPTIONKEY=replace_with_a_secure_random_string_32_chars
       - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=replace_with_another_secure_random_string_32_chars
       - XPACK_REPORTING_ENCRYPTIONKEY=replace_with_a_third_secure_random_string_32_chars
-      # In server/docker-compose.yml, under kibana > environment:
       - SERVER_SSL_ENABLED=true
       - SERVER_SSL_CERTIFICATE=/usr/share/kibana/config/certs/elasticsearch/elasticsearch.crt
       - SERVER_SSL_KEY=/usr/share/kibana/config/certs/elasticsearch/elasticsearch.key
@@ -152,8 +142,8 @@ services:
       - certs:/usr/share/logstash/config/certs:ro
     ports:
       - "15000:15000/tcp"
-      - "5140:5140/tcp" # segup wazuh
-      - "5142:5142/tcp"  # prodepa wazuh
+      - "5140:5140/tcp"
+      - "5142:5142/tcp"
     environment:
       - ELASTIC_USER=elastic
       - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
@@ -167,6 +157,6 @@ services:
         condition: service_healthy
 
 volumes:
-  esdata:
+  # MODIFIED: Removed kibanadata as it is now a bind mount.
   certs:
   kibana_token:
