@@ -1,0 +1,32 @@
+[Unit]
+Description=FortiGate Log Forwarder (Rust) to Wazuh and ELK
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# The application's executable name is 'wazuh_forwarder' as per Cargo.toml.
+# It is run as root to bind to privileged port 514 and write to /var/.
+User=root
+Group=root
+
+# The application creates its own required directories, but this ensures they exist before startup.
+ExecStartPre=/bin/mkdir -p /var/lib/fortigate-forwarder/threat_intel_cache
+ExecStartPre=/bin/touch /var/log/fortigate_forwarder.log
+ExecStartPre=/bin/chown -R root:root /var/lib/fortigate-forwarder /var/log/fortigate_forwarder.log
+
+# Path to the compiled binary.
+ExecStart=/usr/local/bin/wazuh_forwarder
+
+# The Rust application gracefully handles shutdown on SIGINT.
+KillSignal=SIGINT
+
+# Restart the service on any non-successful exit code.
+Restart=on-failure
+RestartSec=10
+
+# Output application logs to the systemd journal.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
