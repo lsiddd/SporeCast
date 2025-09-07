@@ -15,4 +15,4 @@ reqwest = { version = "0.11", features = ["blocking", "json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 signal-hook = "0.3"
-sha2 = "0.10"  # Added missing dependency
+sha2 = "0.10"
