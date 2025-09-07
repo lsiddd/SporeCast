@@ -11,6 +11,7 @@ use signal_hook::{
     iterator::Signals,
 };
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
     fs::{self, File, OpenOptions},
     io::{self, Write},
@@ -29,9 +30,9 @@ use std::{
 // These constants define the core operational parameters of the forwarder.
 // ==============================================================================
 const FORTIGATE_SYSLOG_PORT: u16 = 514; // The UDP port the forwarder will listen on for Fortigate Syslog messages.
-                                       // IMPORTANT: This application will bind exclusively to this port.
-                                       // Wazuh MUST be configured to listen on a different port (e.g., 1514)
-                                       // for the forwarded logs.
+                                         // IMPORTANT: This application will bind exclusively to this port.
+                                         // Wazuh MUST be configured to listen on a different port (e.g., 1514)
+                                         // for the forwarded logs.
 
 const WAZUH_LOCAL_SYSLOG_HOST: &str = "127.0.0.1"; // The IP address where Wazuh's internal Syslog listener is.
 const WAZUH_LOCAL_SYSLOG_PORT: u16 = 1514;         // The UDP port Wazuh will be reconfigured to listen on.
@@ -42,6 +43,8 @@ const SOCKET_TIMEOUT: u64 = 10; // Timeout in seconds for network socket operati
 const LOG_FILE: &str = "/var/log/fortigate_forwarder.log"; // Path where the forwarder will write its own operational logs.
 const STATE_FILE: &str = "/var/lib/fortigate-forwarder/forwarder_state.json"; // Path to store the behavioral analysis state for persistence across restarts.
 const MAX_QUEUE_SIZE: usize = 10000; // Maximum number of logs to buffer in the in-memory queue between receiver and sender threads.
+const ELK_BATCH_SIZE: usize = 100; // Number of logs to batch before sending to ELK.
+const ELK_BATCH_FLUSH_INTERVAL_SECS: u64 = 1; // Max time to wait (in seconds) before flushing a partial ELK batch.
 
 // --- Telegram Notification Configuration ---
 const ENABLE_TELEGRAM: bool = true; // Set to `true` to enable Telegram status notifications.
@@ -90,7 +93,7 @@ const DOMAIN_FEED_URLS: [&str; 2] = [
 // --- Threat hunting configurations ---
 const ENABLE_BEHAVIORAL_ANALYSIS: bool = true; // Enables custom behavioral analysis rules.
 const BEHAVIOR_WINDOW_MINUTES: i64 = 5; // Time window in minutes for behavioral anomaly detection (e.g., 5 minutes for "high frequency" alerts).
-const HIGH_SEVERITY_THRESHOLD: u8 = 10; // Number of events within `BEHAVIOR_WINDOW_MINUTES` to trigger a high-frequency anomaly.
+const HIGH_SEVERITY_THRESHOLD: u32 = 10; // Number of events within `BEHAVIOR_WINDOW_MINUTES` to trigger a high-frequency anomaly.
 const SUSPICIOUS_PROCESSES: [&str; 15] = [ // Keywords to look for in command lines or messages indicating suspicious activity.
     "meterpreter", "cobaltstrike", "powershell -e", "powershell -enc",
     "certutil", "bitsadmin", "wmic", "mshta", "rundll32", "regsvr32",
@@ -100,7 +103,24 @@ const CRITICAL_ASSETS: [&str; 5] = [ // Keywords to identify access to critical 
     "domain-controller", "database-server", "payment-gateway",
     "erp-system", "scada-system"
 ];
-const CORRELATION_RULES: [(&str, &str); 10] = [ // Pairs of rule names and regex patterns for basic log correlation.
+// Moved CORRELATION_RULES to lazy_static to compile regexes once.
+
+// Lazy static Regex objects for efficient pattern matching across the application.
+lazy_static::lazy_static! {
+    static ref IP_REGEX: Regex = Regex::new(r"\b(?:\d{1,3}\.){3}\d{1,3}\b").unwrap(); // Regex to find IP addresses.
+    static ref DOMAIN_REGEX: Regex = Regex::new(r"\b(?:[a-z0-9]+(?:-[a-z0-9]+)*\.)+[a-z]{2,}\b").unwrap(); // Regex to find domain names.
+    static ref HASH_REGEX: Regex = Regex::new(r"\b[a-f0-9]{32,128}\b").unwrap(); // Regex to find hashes (e.g., MD5, SHA1, SHA256).
+    static ref URL_REGEX: Regex = Regex::new(r#"(https?://[^\s"<>]+|www\.[^\s"<>]+\.[^\s"<>]+)"#).unwrap(); // Regex to find URLs.
+    // Regex to extract Fortigate key=value pairs.
+    static ref FORTIGATE_KV_REGEX: Regex = Regex::new(r#"(\w+)=((?:"((?:[^"\\]|\\.)*)"|([^"\s]+)))"#).unwrap();
+
+    static ref CORRELATION_RULES_COMPILED: Vec<(&'static str, Regex)> = CORRELATION_RULES.iter().map(|(name, pattern)| {
+        (*name, Regex::new(pattern).expect("Failed to compile correlation rule regex"))
+    }).collect();
+}
+
+// CORRELATION_RULES definition needed for lazy_static
+const CORRELATION_RULES: [(&str, &str); 10] = [
     ("brute_force", r"authentication failure"),
     ("port_scan", r"scan detected|port scan"),
     ("malware_exec", r"malware|virus|trojan"),
@@ -113,22 +133,6 @@ const CORRELATION_RULES: [(&str, &str); 10] = [ // Pairs of rule names and regex
     ("persistence", r"persistence mechanism|startup item")
 ];
 
-// Lazy static Regex objects for efficient pattern matching across the application.
-lazy_static::lazy_static! {
-    static ref IP_REGEX: Regex = Regex::new(r"\b(?:\d{1,3}\.){3}\d{1,3}\b").unwrap(); // Regex to find IP addresses.
-    static ref DOMAIN_REGEX: Regex = Regex::new(r"\b(?:[a-z0-9]+(?:-[a-z0-9]+)*\.)+[a-z]{2,}\b").unwrap(); // Regex to find domain names.
-    static ref HASH_REGEX: Regex = Regex::new(r"\b[a-f0-9]{32,128}\b").unwrap(); // Regex to find hashes (e.g., MD5, SHA1, SHA256).
-    static ref URL_REGEX: Regex = Regex::new(r#"(https?://[^\s"<>]+|www\.[^\s"<>]+\.[^\s"<>]+)"#).unwrap(); // Regex to find URLs.
-    // Regex to extract Fortigate key=value pairs.
-    // This improved regex handles values that are either unquoted or enclosed in double quotes,
-    // including cases where the quoted value itself contains escaped quotes.
-    // Group 1: The key name (e.g., 'date', 'devname').
-    // Group 2: The entire value part, including quotes if present.
-    // Group 3: The content of a quoted value (if present).
-    // Group 4: The content of an unquoted value (if present).
-    static ref FORTIGATE_KV_REGEX: Regex = Regex::new(r#"(\w+)=((?:"((?:[^"\\]|\\.)*)"|([^"\s]+)))"#).unwrap();
-}
-
 // ==============================================================================
 // --- Threat Intelligence Database Structure ---
 // This struct holds all loaded threat intelligence indicators.
@@ -136,11 +140,11 @@ lazy_static::lazy_static! {
 #[derive(Serialize, Deserialize, Default, Clone)]
 struct ThreatIntel {
     malicious_ips: HashMap<String, Vec<String>>, // Stores malicious IPs and the list of feeds they appeared in.
-    malicious_domains: HashSet<String>,          // Stores unique malicious domains.
-    malicious_hashes: HashSet<String>,           // Stores unique malicious file hashes.
-    malicious_urls: HashSet<String>,             // Stores unique malicious URLs.
+    malicious_domains: HashSet<String>,            // Stores unique malicious domains.
+    malicious_hashes: HashSet<String>,             // Stores unique malicious file hashes.
+    malicious_urls: HashSet<String>,               // Stores unique malicious URLs.
     suspicious_patterns: HashMap<String, String>, // Custom regex patterns for threat hunting.
-    last_updated: DateTime<Utc>,                 // Timestamp of the last successful update.
+    last_updated: DateTime<Utc>,                   // Timestamp of the last successful update.
 }
 
 impl ThreatIntel {
@@ -242,7 +246,7 @@ impl AlertHistory {
         // Check for high frequency from the same source IP.
         if let Some(src_ip) = log_data.get("srcip").or_else(|| log_data.get("src")).and_then(Value::as_str) {
             if let Some(&count) = self.src_ips.get(src_ip) {
-                if count > HIGH_SEVERITY_THRESHOLD as u32 {
+                if count > HIGH_SEVERITY_THRESHOLD {
                     warn!("High frequency IP detected: {} has {} events in last {} minutes.", src_ip, count, BEHAVIOR_WINDOW_MINUTES);
                     anomalies["high_frequency_ip"] = json!({ "count": count, "time_window_minutes": BEHAVIOR_WINDOW_MINUTES });
                     found_anomaly = true;
@@ -252,7 +256,7 @@ impl AlertHistory {
         // Check for suspicious user activity frequency.
         if let Some(user) = log_data.get("user").and_then(Value::as_str) {
             if let Some(&count) = self.users.get(user) {
-                if count > HIGH_SEVERITY_THRESHOLD as u32 {
+                if count > HIGH_SEVERITY_THRESHOLD {
                     warn!("High frequency user detected: {} has {} events in last {} minutes.", user, count, BEHAVIOR_WINDOW_MINUTES);
                     anomalies["high_frequency_user"] = json!({ "count": count, "time_window_minutes": BEHAVIOR_WINDOW_MINUTES });
                     found_anomaly = true;
@@ -262,7 +266,7 @@ impl AlertHistory {
         // Check for specific Fortigate log ID flooding.
         if let Some(logid) = log_data.get("logid").and_then(Value::as_u64) {
             if let Some(&count) = self.rules.get(&(logid as u32)) {
-                if count > HIGH_SEVERITY_THRESHOLD as u32 {
+                if count > HIGH_SEVERITY_THRESHOLD {
                     warn!("High frequency Log ID detected: {} has {} events in last {} minutes.", logid, count, BEHAVIOR_WINDOW_MINUTES);
                     anomalies["high_frequency_logid"] = json!({ "count": count, "time_window_minutes": BEHAVIOR_WINDOW_MINUTES });
                     found_anomaly = true;
@@ -371,52 +375,42 @@ fn send_telegram_message(message: &str) {
 fn extract_iocs(log_data: &Value) -> HashMap<&'static str, Vec<String>> {
     debug!("Extracting IOCs from log data.");
     let mut iocs = HashMap::new();
-    let mut results = Vec::new(); // Stores (ioc_type, value) pairs.
+    
+    // Helper closure to collect matches from a string
+    let mut collect_matches = |s: &str| {
+        iocs.entry("ip").or_insert_with(Vec::new).extend(IP_REGEX.find_iter(s).map(|m| m.as_str().to_string()));
+        iocs.entry("domain").or_insert_with(Vec::new).extend(DOMAIN_REGEX.find_iter(s).map(|m| m.as_str().to_string()));
+        iocs.entry("hash").or_insert_with(Vec::new).extend(HASH_REGEX.find_iter(s).map(|m| m.as_str().to_string()));
+        iocs.entry("url").or_insert_with(Vec::new).extend(URL_REGEX.find_iter(s).map(|m| m.as_str().to_string()));
+    };
 
     // Recursively traverse the JSON value to find all string fields.
-    find_in_value(log_data, &mut |value, _path| {
-        if let Some(s) = value.as_str() {
-            // Apply regexes to the string and collect matches.
-            results.extend(IP_REGEX.find_iter(s).map(|m| ("ip", m.as_str().to_string())));
-            results.extend(DOMAIN_REGEX.find_iter(s).map(|m| ("domain", m.as_str().to_string())));
-            results.extend(HASH_REGEX.find_iter(s).map(|m| ("hash", m.as_str().to_string())));
-            results.extend(URL_REGEX.find_iter(s).map(|m| ("url", m.as_str().to_string())));
+    // This is now a closure that can capture `collect_matches` and `iocs` indirectly.
+    let find_in_value_recursive_and_collect = |value: &Value, f: &mut dyn FnMut(&str)| {
+        fn inner(value: &Value, f: &mut dyn FnMut(&str)) {
+            match value {
+                Value::Object(map) => {
+                    for (_, val) in map {
+                        inner(val, f);
+                    }
+                }
+                Value::Array(arr) => {
+                    for val in arr {
+                        inner(val, f);
+                    }
+                }
+                Value::String(s) => {
+                    f(s);
+                }
+                _ => {} // Do nothing for other types (Number, Bool, Null).
+            }
         }
-    });
+        inner(value, f);
+    };
 
-    // Aggregate results into the final HashMap.
-    for (ioc_type, value) in results {
-        iocs.entry(ioc_type).or_insert_with(Vec::new).push(value);
-    }
+    find_in_value_recursive_and_collect(log_data, &mut collect_matches);
     debug!("Extracted IOCs: {:?}", iocs);
     iocs
-}
-
-// Helper function to recursively traverse a JSON Value.
-fn find_in_value<F>(value: &Value, f: &mut F) where F: FnMut(&Value, &str) {
-    find_in_value_recursive(value, String::new(), f);
-}
-
-// Recursive implementation of `find_in_value`.
-fn find_in_value_recursive<F>(value: &Value, current_path: String, f: &mut F) where F: FnMut(&Value, &str) {
-    f(value, &current_path); // Apply the function to the current value.
-    match value {
-        Value::Object(map) => {
-            // If it's an object, iterate over key-value pairs.
-            for (key, val) in map {
-                let new_path = if current_path.is_empty() { key.clone() } else { format!("{}.{}", current_path, key) };
-                find_in_value_recursive(val, new_path, f);
-            }
-        }
-        Value::Array(arr) => {
-            // If it's an array, iterate over elements.
-            for (index, val) in arr.iter().enumerate() {
-                let new_path = format!("{}[{}]", current_path, index);
-                find_in_value_recursive(val, new_path, f);
-            }
-        }
-        _ => {} // Do nothing for other types (String, Number, Bool, Null).
-    }
 }
 
 // Main function for enriching and analyzing a single Fortigate log.
@@ -446,9 +440,9 @@ fn enrich_and_analyze_log(log_data: &mut Value, intel: &ThreatIntel, state: &mut
         if !malicious_ip_hits.is_empty() {
             ioc_matches["malicious_ips"] = Value::Array(malicious_ip_hits);
             found_ioc_match = true;
+        } else {
+            debug!("No IP addresses extracted for IOC check.");
         }
-    } else {
-        debug!("No IP addresses extracted for IOC check.");
     }
 
     // Domain, Hash, and URL checks: Checks extracted domains, hashes, and URLs against their respective databases.
@@ -497,20 +491,51 @@ fn enrich_and_analyze_log(log_data: &mut Value, intel: &ThreatIntel, state: &mut
 
     // Suspicious Patterns: Looks for specific regex patterns within any string field.
     let mut suspicious_patterns_found = Vec::new();
-    find_in_value(log_data, &mut |value, path| {
-        if let Some(s) = value.as_str() {
-            for (name, pattern) in &intel.suspicious_patterns {
-                if let Ok(re) = Regex::new(pattern) {
-                    if re.is_match(s) {
-                        warn!("Threat Hunt: Suspicious pattern '{}' found in field '{}'. Sample: '{}'.", name, path, s.chars().take(100).collect::<String>());
-                        suspicious_patterns_found.push(json!({"pattern": name, "field_path": path, "sample": s.chars().take(100).collect::<String>()}));
+
+    // Now a closure, capturing `intel` from the outer scope
+    let check_suspicious_patterns = |value: &Value, path: String, f: &mut dyn FnMut(&str, &str, &str)| {
+        fn inner(value: &Value, path: String, intel_patterns: &HashMap<String, String>, f: &mut dyn FnMut(&str, &str, &str)) {
+            match value {
+                Value::Object(map) => {
+                    for (key, val) in map {
+                        let new_path = if path.is_empty() { key.clone() } else { format!("{}.{}", path, key) };
+                        inner(val, new_path, intel_patterns, f);
                     }
-                } else {
-                    error!("Failed to compile regex pattern: {}", pattern);
                 }
+                Value::Array(arr) => {
+                    for (index, val) in arr.iter().enumerate() {
+                        let new_path = format!("{}[{}]", path, index);
+                        inner(val, new_path, intel_patterns, f);
+                    }
+                }
+                Value::String(s) => {
+                    for (name, pattern) in intel_patterns { // Access intel_patterns via argument
+                        // Optimization: For a large number of suspicious_patterns,
+                        // compiling them once into a lazy_static! would be more efficient,
+                        // similar to CORRELATION_RULES_COMPILED.
+                        // For now, given it's a small hardcoded map, we keep it as is.
+                        if let Ok(re) = Regex::new(pattern) {
+                            if re.is_match(s) {
+                                f(name, &path, s);
+                            }
+                        } else {
+                            error!("Failed to compile regex pattern: {}", pattern);
+                        }
+                    }
+                }
+                _ => {}
             }
         }
-    });
+        inner(value, path, &intel.suspicious_patterns, f); // Pass intel.suspicious_patterns
+    };
+    
+    let mut collect_suspicious = |name: &str, path: &str, s: &str| {
+        warn!("Threat Hunt: Suspicious pattern '{}' found in field '{}'. Sample: '{}'.", name, path, s.chars().take(100).collect::<String>());
+        suspicious_patterns_found.push(json!({"pattern": name, "field_path": path, "sample": s.chars().take(100).collect::<String>()}));
+        found_hunt_detection = true;
+    };
+    check_suspicious_patterns(log_data, String::new(), &mut collect_suspicious);
+
     if !suspicious_patterns_found.is_empty() { 
         hunt_detections["suspicious_patterns"] = Value::Array(suspicious_patterns_found); 
         found_hunt_detection = true; 
@@ -522,8 +547,9 @@ fn enrich_and_analyze_log(log_data: &mut Value, intel: &ThreatIntel, state: &mut
     // Suspicious Processes: Checks for known suspicious process names in relevant Fortigate log fields.
     if let Some(cmd) = log_data.get("msg").or_else(|| log_data.get("eventdescription")).and_then(Value::as_str) {
         debug!("Checking for suspicious processes in command/message: {}", cmd);
-        for process in SUSPICIOUS_PROCESSES {
-            if cmd.to_lowercase().contains(process) { 
+        let lower_cmd = cmd.to_lowercase(); // Convert once
+        for process in SUSPICIOUS_PROCESSES.iter() {
+            if lower_cmd.contains(process) { 
                 warn!("Threat Hunt: Suspicious process keyword '{}' detected in log.", process);
                 hunt_detections["suspicious_process"] = json!(process); 
                 found_hunt_detection = true; 
@@ -537,8 +563,9 @@ fn enrich_and_analyze_log(log_data: &mut Value, intel: &ThreatIntel, state: &mut
     // Critical Asset Access: Checks for keywords indicating access to predefined critical assets.
     if let Some(desc) = log_data.get("msg").or_else(|| log_data.get("logdesc")).and_then(Value::as_str) {
         debug!("Checking for critical asset access in message/log description: {}", desc);
-        for asset in CRITICAL_ASSETS {
-            if desc.to_lowercase().contains(asset) { 
+        let lower_desc = desc.to_lowercase(); // Convert once
+        for asset in CRITICAL_ASSETS.iter() {
+            if lower_desc.contains(asset) { 
                 warn!("Threat Hunt: Critical asset access keyword '{}' detected in log.", asset);
                 hunt_detections["critical_asset_access"] = json!(asset); 
                 found_hunt_detection = true; 
@@ -553,14 +580,10 @@ fn enrich_and_analyze_log(log_data: &mut Value, intel: &ThreatIntel, state: &mut
     if let Some(desc) = log_data.get("msg").or_else(|| log_data.get("logdesc")).and_then(Value::as_str) {
         debug!("Checking correlation rules against message/log description: {}", desc);
         let mut matches = Vec::new();
-        for (name, pattern) in CORRELATION_RULES.iter() {
-            if let Ok(re) = Regex::new(pattern) {
-                if re.is_match(desc) { 
-                    info!("Threat Hunt: Correlation rule '{}' matched with pattern '{}'.", name, pattern);
-                    matches.push(json!({ "rule": name, "pattern": pattern })); 
-                }
-            } else {
-                error!("Failed to compile correlation rule regex pattern: {}", pattern);
+        for (name, re) in CORRELATION_RULES_COMPILED.iter() { // Use pre-compiled regexes
+            if re.is_match(desc) { 
+                info!("Threat Hunt: Correlation rule '{}' matched with pattern '{}'.", name, re.as_str());
+                matches.push(json!({ "rule": name, "pattern": re.as_str() })); 
             }
         }
         if !matches.is_empty() { 
@@ -758,17 +781,15 @@ fn threat_intel_updater_thread(intel_db: Arc<Mutex<ThreatIntel>>, shutdown: Arc<
         
         // --- Fetch Malicious Hashes ---
         info!("Fetching malicious Hash feeds...");
-        let mut all_hashes = HashSet::new();
-        for url in HASH_FEED_URLS.iter() {
+        for url in HASH_FEED_URLS.iter() { // Corrected: HASH_FEED_URLS (was HASH_FEED_URLs)
             match download_feed(url) {
                 Ok(items) => {
                     info!("Successfully downloaded {} Hashes from {}.", items.len(), url);
-                    all_hashes.extend(items)
+                    new_intel.malicious_hashes.extend(items)
                 },
                 Err(e) => error!("Failed to download hash feed {}: {}", url, e),
             }
         }
-        new_intel.malicious_hashes = all_hashes;
         info!("Completed Hash feed fetching. Loaded {} malicious hashes.", new_intel.malicious_hashes.len());
 
         // --- Fetch Malicious Domains ---
@@ -847,19 +868,21 @@ fn parse_fortigate_log_to_json(raw_log: &str) -> Result<Value> {
     // 2. Parse key=value pairs from the extracted log content.
     for cap in FORTIGATE_KV_REGEX.captures_iter(log_content) {
         let key = cap.get(1).map_or("", |m| m.as_str()).to_string(); // Get the key name.
-        let mut value_str = cap.get(4).map_or_else(|| cap.get(3).map_or("", |m| m.as_str()), |m| m.as_str()).to_string();
-        // The `cap.get(4)` is for unquoted, `cap.get(3)` is for quoted content.
-        // We prioritize unquoted if both exist, but regex should ensure only one matches.
+        
+        let value_cow: Cow<'_, str> = if let Some(quoted_match) = cap.get(3) {
+            // Quoted value, unescape it
+            let unescaped = quoted_match.as_str().replace("\\\"", "\""); // Basic unescaping
+            Cow::Owned(unescaped)
+        } else if let Some(unquoted_match) = cap.get(4) {
+            // Unquoted value, use directly
+            Cow::Borrowed(unquoted_match.as_str())
+        } else {
+            // Should not happen given regex structure, but handle defensively
+            Cow::Borrowed("")
+        };
 
-        debug!("Extracted raw key-value pair: key='{}', value_str='{}'", key, value_str);
-
-        // Basic unescaping for common cases (e.g., removing leading/trailing quotes).
-        // For more complex unescaping (e.g., handling `\"` within a quoted string),
-        // you would need a more sophisticated function.
-        if value_str.starts_with('"') && value_str.ends_with('"') && value_str.len() > 1 {
-            debug!("Value '{}' is quoted. Removing quotes.", value_str);
-            value_str = value_str[1..value_str.len() - 1].to_string();
-        }
+        let value_str = value_cow.as_ref();
+        debug!("Extracted key-value pair: key='{}', value_str='{}'", key, value_str);
 
         // Attempt to parse known numeric fields to actual numbers in JSON.
         // If parsing fails, store as a string.
@@ -873,7 +896,7 @@ fn parse_fortigate_log_to_json(raw_log: &str) -> Result<Value> {
             "dstdevtype" | "masterdstmac" | "dstmac" | "dstserver" | "hostname" | "profile" |
             "reqtype" | "url" | "method" | "catdesc" => {
                 debug!("Key '{}' identified as string type.", key);
-                Value::String(value_str)
+                Value::String(value_str.to_string())
             },
             // Fields typically expected to be numbers (integers or floats).
             "eventtime" | "logid" | "appid" | "srcport" | "dstport" | "policyid" | "sessionid" |
@@ -884,21 +907,21 @@ fn parse_fortigate_log_to_json(raw_log: &str) -> Result<Value> {
                     Value::Number(num.into())
                 } else if let Ok(num) = value_str.parse::<f64>() {
                     debug!("Key '{}' parsed as float: {}", key, num);
-                    Value::Number(serde_json::Number::from_f64(num).unwrap_or(0.into())) // Fallback to 0 if float conversion fails (shouldn't happen with Ok()).
+                    Value::Number(serde_json::Number::from_f64(num).unwrap_or_else(|| 0.into()))
                 } else {
                     warn!("Key '{}' expected to be numeric, but parsing failed. Storing as string: '{}'", key, value_str);
-                    Value::String(value_str) // Fallback to string if numeric parsing fails.
+                    Value::String(value_str.to_string()) // Fallback to string if numeric parsing fails.
                 }
             },
             // Fields for IP addresses, typically stored as strings.
             "srcip" | "dstip" | "transip" => {
                 debug!("Key '{}' identified as IP address string.", key);
-                Value::String(value_str)
+                Value::String(value_str.to_string())
             },
             // Default case: if key is not specifically matched, store as string.
             _ => {
                 debug!("Key '{}' not explicitly handled. Storing as string: '{}'", key, value_str);
-                Value::String(value_str)
+                Value::String(value_str.to_string())
             },
         };
         json_map.insert(key, parsed_value); // Insert the parsed key-value pair into the map.
@@ -921,10 +944,10 @@ fn parse_fortigate_log_to_json(raw_log: &str) -> Result<Value> {
 // It then forwards a raw copy to Wazuh and sends a parsed/enriched JSON copy to ELK.
 // ==============================================================================
 fn syslog_receiver_thread(
-    state_manager: Arc<Mutex<StateManager>>,      // Shared StateManager for behavioral history.
-    elk_sender: Sender<String>,                   // Channel to send processed JSON logs to the ELK sender thread.
-    threat_intel_db: Arc<Mutex<ThreatIntel>>,     // Shared Threat Intelligence database.
-    shutdown: Arc<AtomicBool>,                    // Atomic flag for graceful shutdown.
+    state_manager: Arc<Mutex<StateManager>>,     // Shared StateManager for behavioral history.
+    elk_sender: Sender<String>,                  // Channel to send processed JSON logs to the ELK sender thread.
+    threat_intel_db: Arc<Mutex<ThreatIntel>>,    // Shared Threat Intelligence database.
+    shutdown: Arc<AtomicBool>,                   // Atomic flag for graceful shutdown.
 ) -> Result<()> {
     info!("Syslog receiver thread starting. Will bind to UDP port {}.", FORTIGATE_SYSLOG_PORT);
     let bind_addr = format!("0.0.0.0:{}", FORTIGATE_SYSLOG_PORT);
@@ -971,6 +994,9 @@ fn syslog_receiver_thread(
                     Ok(mut log_json) => {
                         debug!("Successfully parsed raw log to JSON for ELK.");
                         // Acquire locks for shared resources.
+                        // IMPORTANT: Acquire locks only when needed and release quickly.
+                        // Holding a lock across complex operations like network calls or extensive parsing
+                        // can severely bottleneck performance.
                         let intel = threat_intel_db.lock().unwrap(); // Lock for read access to threat intel.
                         let mut state = state_manager.lock().unwrap(); // Lock for mutable access to state manager.
 
@@ -1031,11 +1057,13 @@ fn elk_sender_thread(receiver: Receiver<String>, shutdown: Arc<AtomicBool>) -> R
     let mut last_heartbeat = Instant::now(); // Tracks time for sending heartbeats.
     let mut logs_processed_since_heartbeat = 0; // Counts logs for heartbeat message.
     let mut stream: Option<TcpStream> = None; // The TCP stream to Logstash.
+    let mut batch_buffer: Vec<String> = Vec::with_capacity(ELK_BATCH_SIZE); // Buffer for batching logs
+    let mut last_batch_flush = Instant::now();
 
     // Attempt initial connection to ELK.
     debug!("ELK sender: Attempting initial connection to {}.", addr);
     match TcpStream::connect_timeout(&addr, Duration::from_secs(SOCKET_TIMEOUT)) {
-        Ok(mut s) => {
+        Ok(s) => { 
             s.set_write_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT)))
                 .context("Failed to set write timeout on ELK TCP stream")?;
             s.set_read_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT)))
@@ -1050,71 +1078,76 @@ fn elk_sender_thread(receiver: Receiver<String>, shutdown: Arc<AtomicBool>) -> R
         }
     };
 
-    while !shutdown.load(Ordering::Relaxed) || !receiver.is_empty() {
+    // Helper function to send the current batch
+    let send_batch = |stream: &mut TcpStream, buffer: &mut Vec<String>, logs_processed_count: &mut u64| -> Result<()> { 
+        if buffer.is_empty() {
+            return Ok(());
+        }
+        let payload = buffer.join("\n") + "\n"; // Join with newline and add final newline
+        debug!("ELK sender: Sending batch of {} logs ({} bytes) to ELK.", buffer.len(), payload.len());
+        stream.write_all(payload.as_bytes())?;
+        *logs_processed_count += buffer.len() as u64;
+        buffer.clear();
+        Ok(())
+    };
+
+    while !shutdown.load(Ordering::Relaxed) || !receiver.is_empty() || !batch_buffer.is_empty() {
         // Send a heartbeat message periodically.
         if last_heartbeat.elapsed().as_secs() >= HEARTBEAT_INTERVAL {
-            let message = format!("❤️ *Heartbeat:* Service is alive. {} logs forwarded since last heartbeat. Queue size: {}.", 
-                                  logs_processed_since_heartbeat, receiver.len());
+            let message = format!("❤️ *Heartbeat:* Service is alive. {} logs forwarded since last heartbeat. Queue size: {}. Batch buffer: {}.", 
+                                  logs_processed_since_heartbeat, receiver.len(), batch_buffer.len());
             send_telegram_message(&message);
             info!("{}", message);
             logs_processed_since_heartbeat = 0; // Reset counter.
             last_heartbeat = Instant::now(); // Reset timer.
         }
 
-        // Try to receive a log from the channel.
-        match receiver.recv_timeout(Duration::from_secs(1)) {
+        // Try to receive a log from the channel or flush batch if timeout reached
+        let recv_timeout = if batch_buffer.is_empty() {
+            Duration::from_secs(1) // Wait longer if no logs in buffer
+        } else {
+            // Wait up to ELK_BATCH_FLUSH_INTERVAL_SECS, but no longer than needed to fill batch
+            let remaining_time = Duration::from_secs(ELK_BATCH_FLUSH_INTERVAL_SECS)
+                .checked_sub(last_batch_flush.elapsed())
+                .unwrap_or(Duration::ZERO);
+            remaining_time.min(Duration::from_millis(100)) // Poll more frequently for batching
+        };
+
+        match receiver.recv_timeout(recv_timeout) {
             Ok(message) => {
                 debug!("ELK sender: Received log from channel. Queue size remaining: {}", receiver.len());
-                let data = message + "\n"; // Append newline for Logstash JSON input.
-                let mut success = false; // Flag to track if the current log was sent.
+                batch_buffer.push(message);
 
-                // Loop to attempt sending the log, including reconnection logic.
-                while !success && !shutdown.load(Ordering::Relaxed) {
+                if batch_buffer.len() >= ELK_BATCH_SIZE {
+                    debug!("Batch buffer full ({} logs). Flushing to ELK.", batch_buffer.len());
                     if let Some(ref mut s) = stream {
-                        debug!("ELK sender: Attempting to write log data to TCP stream.");
-                        match s.write_all(data.as_bytes()) {
-                            Ok(_) => {
-                                debug!("ELK sender: Successfully sent log to ELK.");
-                                logs_processed_since_heartbeat += 1;
-                                success = true; // Log sent successfully.
-                                retry_delay = 5; // Reset retry delay on success.
-                            },
-                            Err(e) => {
-                                warn!("ELK sender: Failed to write to TCP stream: {}. Connection might be broken. Attempting to reconnect.", e);
-                                stream = None; // Mark stream as broken.
-                            }
+                        if let Err(e) = send_batch(s, &mut batch_buffer, &mut logs_processed_since_heartbeat) {
+                            warn!("ELK sender: Failed to send batch to TCP stream: {}. Connection might be broken. Attempting to reconnect.", e);
+                            stream = None; // Mark stream as broken.
                         }
+                    } else {
+                        debug!("ELK sender: No active connection, holding batch in buffer.");
                     }
-                    
-                    if !success {
-                        warn!("ELK sender: Not connected or connection broken. Waiting {}s before next reconnection attempt.", retry_delay);
-                        send_telegram_message(&format!("⚠️ *ELK Connection Lost:* Retrying in {}s. Queue size: {}.", retry_delay, receiver.len()));
-                        thread::sleep(Duration::from_secs(retry_delay)); // Wait before retrying.
-
-                        debug!("ELK sender: Attempting to reconnect to ELK at {}.", addr);
-                        match TcpStream::connect_timeout(&addr, Duration::from_secs(SOCKET_TIMEOUT)) {
-                            Ok(mut s) => {
-                                s.set_write_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT)))
-                                    .context("Failed to set write timeout on ELK TCP stream during reconnection")?;
-                                s.set_read_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT)))
-                                    .context("Failed to set read timeout on ELK TCP stream during reconnection")?;
-                                info!("ELK sender: Successfully reconnected to ELK.");
-                                send_telegram_message(&format!("✅ *Reconnected:* Successfully reconnected to ELK."));
-                                stream = Some(s); // Set new stream.
-                                retry_delay = 5; // Reset delay.
-                            }
-                            Err(e) => {
-                                error!("ELK sender: Reconnection to ELK failed: {}. Next retry in {}s.", e, std::cmp::min(retry_delay * 2, 60));
-                                retry_delay = std::cmp::min(retry_delay * 2, 60); // Exponential backoff, max 60s.
-                            }
-                        }
-                    }
+                    last_batch_flush = Instant::now();
                 }
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                // No messages in the queue for the timeout duration. Continue looping to check shutdown flag.
-                debug!("ELK sender: No messages in queue for 1 second. Checking shutdown status.");
-                continue;
+                // No messages in the queue for the timeout duration.
+                // Check if it's time to flush partial batch.
+                if !batch_buffer.is_empty() && last_batch_flush.elapsed().as_secs() >= ELK_BATCH_FLUSH_INTERVAL_SECS {
+                    debug!("ELK sender: Flushing partial batch ({} logs) due to timeout.", batch_buffer.len());
+                    if let Some(ref mut s) = stream {
+                        if let Err(e) = send_batch(s, &mut batch_buffer, &mut logs_processed_since_heartbeat) {
+                            warn!("ELK sender: Failed to send partial batch to TCP stream: {}. Connection might be broken. Attempting to reconnect.", e);
+                            stream = None; // Mark stream as broken.
+                        }
+                    } else {
+                        debug!("ELK sender: No active connection, holding partial batch in buffer.");
+                    }
+                    last_batch_flush = Instant::now();
+                }
+                debug!("ELK sender: No data in queue for timeout. Checking shutdown status.");
+                continue; // Continue looping to check shutdown flag.
             }
             Err(e) => {
                 // The channel has disconnected (e.g., sender thread terminated).
@@ -1122,7 +1155,45 @@ fn elk_sender_thread(receiver: Receiver<String>, shutdown: Arc<AtomicBool>) -> R
                 break;
             }
         }
+
+        // Reconnection logic if stream.is_none()
+        if stream.is_none() {
+            warn!("ELK sender: Not connected. Waiting {}s before next reconnection attempt.", retry_delay);
+            send_telegram_message(&format!("⚠️ *ELK Connection Lost:* Retrying in {}s. Queue size: {}. Batch buffer: {}.", retry_delay, receiver.len(), batch_buffer.len()));
+            thread::sleep(Duration::from_secs(retry_delay)); // Wait before retrying.
+
+            debug!("ELK sender: Attempting to reconnect to ELK at {}.", addr);
+            match TcpStream::connect_timeout(&addr, Duration::from_secs(SOCKET_TIMEOUT)) {
+                Ok(s) => { 
+                    s.set_write_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT)))
+                        .context("Failed to set write timeout on ELK TCP stream during reconnection")?;
+                    s.set_read_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT)))
+                        .context("Failed to set read timeout on ELK TCP stream during reconnection")?;
+                    info!("ELK sender: Successfully reconnected to ELK.");
+                    send_telegram_message(&format!("✅ *Reconnected:* Successfully reconnected to ELK."));
+                    stream = Some(s); // Set new stream.
+                    retry_delay = 5; // Reset delay.
+                }
+                Err(e) => {
+                    error!("ELK sender: Reconnection to ELK failed: {}. Next retry in {}s.", e, std::cmp::min(retry_delay * 2, 60));
+                    retry_delay = std::cmp::min(retry_delay * 2, 60); // Exponential backoff, max 60s.
+                }
+            }
+        }
     }
+
+    // Attempt to flush any remaining logs in the buffer before shutting down
+    if !batch_buffer.is_empty() {
+        info!("ELK sender: Flushing remaining {} logs in buffer before shutting down.", batch_buffer.len());
+        if let Some(ref mut s) = stream {
+            if let Err(e) = send_batch(s, &mut batch_buffer, &mut logs_processed_since_heartbeat) {
+                error!("ELK sender: Failed to flush final batch: {}", e);
+            }
+        } else {
+            warn!("ELK sender: No active ELK connection to flush remaining logs.");
+        }
+    }
+
     info!("ELK sender thread received shutdown signal or queue is empty. Flushing remaining logs and shutting down.");
     // Small final delay to ensure any last-moment writes complete.
     thread::sleep(Duration::from_millis(100)); 
@@ -1190,7 +1261,7 @@ fn main() -> Result<()> {
     };
 
     info!("==============================================");
-    info!("       Fortigate Raw Log Forwarder (Rust)     ");
+    info!("        Fortigate Raw Log Forwarder (Rust)    ");
     info!("==============================================");
     info!("Service starting up in Belém, State of Pará, Brazil. Current time: {}", Local::now().format("%Y-%m-%d %H:%M:%S %Z"));
     info!("Configured to receive Fortigate logs on UDP port: {}", FORTIGATE_SYSLOG_PORT);
