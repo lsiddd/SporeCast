@@ -16,7 +16,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{self},
     net::{Ipv4Addr, SocketAddr},
-    path::Path, // Added this import
+    path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -25,7 +25,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{
-    io::AsyncWriteExt, // Removed AsyncReadExt
+    io::AsyncWriteExt,
     net::{TcpStream, UdpSocket},
     task::JoinSet,
 };
@@ -49,6 +49,7 @@ const LOG_FILE: &str = "/var/log/fortigate_forwarder.log"; // Path where the for
 const STATE_FILE: &str = "/var/lib/fortigate-forwarder/forwarder_state.json"; // Path to store the behavioral analysis state for persistence across restarts.
 const MAX_RECEIVER_QUEUE_SIZE: usize = 50000; // Max logs buffered between receiver and enrichment threads. Increased for high throughput.
 const MAX_ENRICHMENT_QUEUE_SIZE: usize = 40000; // Max logs buffered between enrichment and sender threads. Increased for high throughput.
+const MAX_WAZUH_QUEUE_SIZE: usize = 40000; // Max logs buffered for Wazuh sender. Added for new channel.
 const ENRICHMENT_WORKER_COUNT: usize = 8; // Number of threads to process and enrich logs concurrently. Adjust based on CPU cores.
 const ELK_BATCH_SIZE: usize = 1000; // Number of logs to batch before sending to ELK. Increased for efficiency.
 const ELK_BATCH_FLUSH_INTERVAL_SECS: u64 = 1; // Max time to wait (in seconds) before flushing a partial ELK batch.
@@ -428,7 +429,8 @@ impl StateManager {
 // --- Telegram Notifications ---
 // Handles sending messages to a Telegram bot.
 // ==============================================================================
-async fn send_telegram_message(message: String) { // Changed to take String to own the message
+async fn send_telegram_message(message: String) {
+    // Changed to take String to own the message
     if !ENABLE_TELEGRAM {
         debug!(
             "Telegram notifications are disabled. Skipping message: {}",
@@ -1077,7 +1079,8 @@ async fn threat_intel_updater_thread(intel_db: Arc<Mutex<ThreatIntel>>, shutdown
             "Threat intelligence databases updated. Total indicators: {}",
             total_indicators
         );
-        tokio::spawn(send_telegram_message(format!( // Cloned String here
+        tokio::spawn(send_telegram_message(format!(
+            // Cloned String here
             "✅ Threat intelligence databases updated. Total indicators loaded: {}.",
             total_indicators
         )));
@@ -1236,12 +1239,201 @@ fn parse_fortigate_log_to_json(raw_log: &str) -> Result<Value> {
 }
 
 // ==============================================================================
+// --- Fortigate Syslog Formatter ---
+// This function takes a JSON log and converts it back to a Fortigate-like syslog string.
+// It prioritizes certain fields for the syslog header and formats key-value pairs.
+// ==============================================================================
+fn format_json_to_fortigate_syslog(log_json: &Value) -> Result<String> {
+    let mut parts = Vec::new();
+
+    // Helper to format a value for syslog, handling quoting and internal escaping
+    fn format_syslog_value(value: &Value) -> String {
+        match value {
+            Value::String(s) => format!("\"{}\"", s.replace("\"", "\\\"")),
+            Value::Number(n) => n.to_string(),
+            Value::Bool(b) => b.to_string(),
+            Value::Array(arr) => {
+                // For arrays, join elements with comma, quoting strings
+                let elements: Vec<String> = arr.iter().map(|elem| {
+                    if let Value::String(s) = elem {
+                        s.replace("\"", "\\\"") // Escape quotes, but no outer quotes for array elements
+                    } else {
+                        elem.to_string()
+                    }
+                }).collect();
+                elements.join(",") // Example: item1,item2,"item with space"
+            },
+            Value::Null => "null".to_string(), // Or choose to skip nulls if preferred
+            _ => "".to_string(), // Should not happen for Value::Object in this refactored logic, but fallback
+        }
+    }
+
+
+    // Prioritize specific fields for the beginning of the syslog message
+    if let Some(date) = log_json.get("date").and_then(Value::as_str) {
+        parts.push(format!("date={}", date));
+    }
+    if let Some(time) = log_json.get("time").and_then(Value::as_str) {
+        parts.push(format!("time={}", time));
+    }
+    if let Some(devname) = log_json.get("devname").and_then(Value::as_str) {
+        parts.push(format!("devname=\"{}\"", devname));
+    }
+    if let Some(devid) = log_json.get("devid").and_then(Value::as_str) {
+        parts.push(format!("devid=\"{}\"", devid));
+    }
+    if let Some(logid) = log_json.get("logid") {
+        if logid.is_u64() {
+            parts.push(format!("logid={}", logid.as_u64().unwrap()));
+        } else if logid.is_string() {
+            parts.push(format!("logid=\"{}\"", logid.as_str().unwrap()));
+        }
+    }
+
+    // Iterate over all fields in the JSON object
+    if let Some(obj) = log_json.as_object() {
+        for (key, value) in obj {
+            // Skip fields already handled or internal/raw fields that shouldn't be in the syslog output
+            if key == "date" || key == "time" || key == "devname" || key == "devid" || key == "logid"
+                || key == "fortigate_raw_log" || key == "@timestamp"
+                || key == "syslog_priority" || key == "syslog_facility" || key == "syslog_severity"
+            {
+                continue;
+            }
+
+            // --- SPECIAL HANDLING for 'forwarder_enrichment' ---
+            // Instead of nesting, flatten its sub-fields with a prefix
+            if key == "forwarder_enrichment" {
+                if let Some(enrichment_obj) = value.as_object() {
+                    for (enrich_key, enrich_value) in enrichment_obj {
+                        let prefixed_key = format!("enrich_{}", enrich_key); // e.g., enrich_ioc_matches
+                        
+                        // Handle specific enrichment types for better flattening
+                        match enrich_key.as_str() {
+                            "ioc_matches" => {
+                                if let Some(ioc_matches_obj) = enrich_value.as_object() {
+                                    for (ioc_type, ioc_array_val) in ioc_matches_obj {
+                                        if let Some(ioc_array) = ioc_array_val.as_array() {
+                                            let ioc_strings: Vec<String> = ioc_array.iter().flat_map(|item| {
+                                                // Extract primary identifier from each IOC object (e.g., "ip", "domain", "hash", "url")
+                                                if let Some(item_obj) = item.as_object() {
+                                                    if let Some(ip) = item_obj.get("ip").and_then(Value::as_str) {
+                                                        Some(ip.to_string())
+                                                    } else if let Some(domain) = item_obj.get("domain").and_then(Value::as_str) {
+                                                        Some(domain.to_string())
+                                                    } else if let Some(hash) = item_obj.get("hash").and_then(Value::as_str) {
+                                                        Some(hash.to_string())
+                                                    } else if let Some(url) = item_obj.get("url").and_then(Value::as_str) {
+                                                        Some(url.to_string())
+                                                    } else if let Some(pattern) = item_obj.get("pattern").and_then(Value::as_str) { // For suspicious patterns
+                                                        Some(pattern.to_string())
+                                                    } else if let Some(rule) = item_obj.get("rule").and_then(Value::as_str) { // For correlation rules
+                                                        Some(rule.to_string())
+                                                    } else {
+                                                        None
+                                                    }
+                                                } else if let Some(s) = item.as_str() { // Fallback for simple string arrays
+                                                    Some(s.to_string())
+                                                } else {
+                                                    None
+                                                }
+                                            }).collect();
+                                            if !ioc_strings.is_empty() {
+                                                parts.push(format!("enrich_ioc_{}=\"{}\"", ioc_type, ioc_strings.join(",")));
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            "threat_hunting" => {
+                                if let Some(hunt_obj) = enrich_value.as_object() {
+                                    for (hunt_type, hunt_data) in hunt_obj {
+                                        match hunt_type.as_str() {
+                                            "suspicious_patterns" => {
+                                                if let Some(patterns_array) = hunt_data.as_array() {
+                                                    let pattern_names: Vec<String> = patterns_array.iter()
+                                                        .filter_map(|p| p.get("pattern").and_then(Value::as_str).map(String::from))
+                                                        .collect();
+                                                    if !pattern_names.is_empty() {
+                                                        parts.push(format!("enrich_hunt_patterns=\"{}\"", pattern_names.join(",")));
+                                                    }
+                                                }
+                                            },
+                                            "correlation_rules" => {
+                                                if let Some(rules_array) = hunt_data.as_array() {
+                                                    let rule_names: Vec<String> = rules_array.iter()
+                                                        .filter_map(|r| r.get("rule").and_then(Value::as_str).map(String::from))
+                                                        .collect();
+                                                    if !rule_names.is_empty() {
+                                                        parts.push(format!("enrich_hunt_rules=\"{}\"", rule_names.join(",")));
+                                                    }
+                                                }
+                                            },
+                                            // Handle other simple threat_hunting fields directly
+                                            _ => {
+                                                let formatted = format_syslog_value(hunt_data);
+                                                if !formatted.is_empty() && formatted != "\"\"" && formatted != "null" {
+                                                    parts.push(format!("enrich_hunt_{}={}", hunt_type, formatted));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            "behavioral_anomalies" => {
+                                if let Some(anomalies_obj) = enrich_value.as_object() {
+                                    for (anomaly_type, anomaly_data) in anomalies_obj {
+                                        // For simplicity, just indicate presence or extract key counts
+                                        let formatted = format_syslog_value(anomaly_data); // This might still be nested, but simpler than full JSON
+                                        if !formatted.is_empty() && formatted != "\"\"" && formatted != "null" {
+                                             parts.push(format!("enrich_behavior_{}={}", anomaly_type, formatted));
+                                        }
+                                    }
+                                }
+                            },
+                            // Add other top-level enrichment fields here (e.g., intel_last_updated)
+                            _ => {
+                                let formatted = format_syslog_value(enrich_value);
+                                if !formatted.is_empty() && formatted != "\"\"" && formatted != "null" {
+                                     parts.push(format!("{}=\"{}\"", prefixed_key, formatted.trim_matches('"'))); // Remove outer quotes if already string
+                                }
+                            }
+                        }
+                    }
+                }
+                continue; // Skip the main "forwarder_enrichment" field as we've processed its children
+            }
+
+            // Normal field handling for non-enrichment fields
+            let formatted_value = format_syslog_value(value);
+            if !formatted_value.is_empty() && formatted_value != "\"\"" && formatted_value != "null" {
+                parts.push(format!("{}={}", key, formatted_value));
+            }
+        }
+    } else {
+        return Err(anyhow!("Log JSON is not an object, cannot format to Fortigate syslog."));
+    }
+
+    // Join all parts with a space.
+    let body = parts.join(" ");
+
+    // Prepend a syslog header. Fortigate usually sends with facility 1 (user-level) and severity 6 (informational).
+    // The original Fortigate log has a priority. We'll use 134 for user.info (16*8 + 6) or extract from original if available.
+    let syslog_priority = log_json.get("syslog_priority")
+        .and_then(Value::as_u64)
+        .unwrap_or(134); // Default to user.info if not found
+
+    Ok(format!("<{}>{}", syslog_priority, body))
+}
+
+// ==============================================================================
 // --- Syslog Receiver Thread (Async) ---
 // This thread binds to a UDP port and listens for incoming Fortigate Syslog messages.
 // It then forwards a raw copy to Wazuh and sends a raw copy to the enrichment worker pool.
 // ==============================================================================
 async fn syslog_receiver_thread(
     enrichment_tx: Sender<String>, // Channel to send raw logs to enrichment threads.
+    wazuh_raw_tx: Sender<String>,  // Channel to send raw logs to Wazuh.
     shutdown: Arc<AtomicBool>,     // Atomic flag for graceful shutdown.
 ) -> Result<()> {
     info!(
@@ -1254,24 +1446,6 @@ async fn syslog_receiver_thread(
         .with_context(|| format!("Failed to bind UDP socket to {}. This likely means another process (like Wazuh) is already listening on this port. Please reconfigure Wazuh to listen on a different port (e.g., 1514) and ensure this application is the only one on {}.", bind_addr, FORTIGATE_SYSLOG_PORT))?;
 
     info!("Successfully bound UDP socket to {}.", bind_addr);
-
-    // Prepare the UDP socket for forwarding raw logs to Wazuh
-    let wazuh_syslog_addr: SocketAddr =
-        format!("{}:{}", WAZUH_LOCAL_SYSLOG_HOST, WAZUH_LOCAL_SYSLOG_PORT)
-            .parse()
-            .with_context(|| {
-                format!(
-                    "Failed to parse Wazuh local syslog address: {}:{}",
-                    WAZUH_LOCAL_SYSLOG_HOST, WAZUH_LOCAL_SYSLOG_PORT
-                )
-            })?;
-    let wazuh_forward_socket = UdpSocket::bind("0.0.0.0:0") // Bind to any available local port
-        .await
-        .context("Failed to bind UDP socket for Wazuh forwarding")?;
-    info!(
-        "Wazuh raw log forwarding configured to {}.",
-        wazuh_syslog_addr
-    );
 
     let mut buf = [0; 2048]; // Buffer for incoming UDP packets.
 
@@ -1299,32 +1473,28 @@ async fn syslog_receiver_thread(
                         );
                         debug!("Raw log content: '{}'", raw_log);
 
-                        // --- FORWARD RAW LOG TO WAZUH ---
-                        debug!(
-                            "Attempting to forward raw log to Wazuh at {}.",
-                            wazuh_syslog_addr
-                        );
-                        if let Err(e) = wazuh_forward_socket.send_to(raw_log_bytes, wazuh_syslog_addr).await {
-                            error!(
-                                "Failed to forward raw log to Wazuh at {}: {}. Raw log: '{}'",
-                                wazuh_syslog_addr, e, raw_log
-                            );
-                        } else {
-                            debug!(
-                                "Successfully forwarded raw log to Wazuh at {}.",
-                                wazuh_syslog_addr
-                            );
-                        }
-
                         // --- Send RAW LOG to ENRICHMENT WORKERS ---
                         debug!(
                             "Sending raw log to enrichment channel. Queue size: {}",
                             enrichment_tx.len()
                         );
-                        if enrichment_tx.send(raw_log).is_err() {
+                        if enrichment_tx.send(raw_log.clone()).is_err() { // Clone for enrichment
                             warn!("Channel to enrichment workers disconnected. Initiating shutdown of syslog receiver task.");
                             break; // Exit loop if sender channel is closed.
                         }
+
+                        // --- FORWARD RAW LOG TO WAZUH (as is) ---
+                        // This sends the original, non-enriched log to Wazuh.
+                        // The enriched log will be sent via another path later.
+                        debug!(
+                            "Sending raw log to Wazuh raw log channel. Queue size: {}",
+                            wazuh_raw_tx.len()
+                        );
+                        if wazuh_raw_tx.send(raw_log).is_err() {
+                            warn!("Channel to Wazuh raw log sender disconnected. Initiating shutdown of syslog receiver task.");
+                            break;
+                        }
+
                     }
                     Err(e) => {
                         error!(
@@ -1346,16 +1516,18 @@ async fn syslog_receiver_thread(
 // ==============================================================================
 // --- Enrichment Worker Thread ---
 // This thread parses raw logs, enriches them with threat intelligence,
-// performs behavioral analysis, and then sends them to the ELK sender thread.
+// performs behavioral analysis, and then sends them to the ELK sender thread
+// AND to the Wazuh enriched log sender thread.
 // Each worker maintains its own AlertHistory that is periodically merged.
 // ==============================================================================
 fn enrichment_worker_thread(
     worker_id: usize,
     raw_log_rx: Receiver<String>, // Channel to receive raw logs from syslog receiver.
     elk_tx: Sender<String>,        // Channel to send processed JSON logs to ELK sender.
+    wazuh_enriched_tx: Sender<String>, // New channel to send enriched logs to Wazuh sender.
     threat_intel_db: Arc<Mutex<ThreatIntel>>, // Shared Threat Intelligence database (read-only access).
-    state_merger_tx: Sender<AlertHistory>,    // Channel to send worker's AlertHistory for merging.
-    shutdown: Arc<AtomicBool>,                // Atomic flag for graceful shutdown.
+    state_merger_tx: Sender<AlertHistory>,     // Channel to send worker's AlertHistory for merging.
+    shutdown: Arc<AtomicBool>,                 // Atomic flag for graceful shutdown.
 ) -> Result<()> {
     info!("[Worker {}] Enrichment worker thread started.", worker_id);
     let mut worker_alert_history = AlertHistory::default();
@@ -1386,13 +1558,28 @@ fn enrichment_worker_thread(
                     Ok(log_json) => {
                         let enriched_log_json =
                             enrich_and_analyze_log(log_json, &intel, &mut worker_alert_history);
-                        let enriched_line = serde_json::to_string(&enriched_log_json)
-                            .context("Failed to serialize enriched log to JSON string")?;
 
+                        // Send to ELK
+                        let enriched_json_string = serde_json::to_string(&enriched_log_json)
+                            .context("Failed to serialize enriched log to JSON string for ELK")?;
                         debug!("[Worker {}] Sending enriched log to ELK sender channel. ELK queue size: {}", worker_id, elk_tx.len());
-                        if elk_tx.send(enriched_line).is_err() {
+                        if elk_tx.send(enriched_json_string).is_err() {
                             warn!("[Worker {}] Channel to ELK sender disconnected. Initiating shutdown.", worker_id);
                             break;
+                        }
+
+                        // Send enriched log to Wazuh in Fortigate syslog format
+                        match format_json_to_fortigate_syslog(&enriched_log_json) {
+                            Ok(formatted_syslog) => {
+                                debug!("[Worker {}] Sending formatted enriched log to Wazuh channel. Wazuh queue size: {}", worker_id, wazuh_enriched_tx.len());
+                                if wazuh_enriched_tx.send(formatted_syslog).is_err() {
+                                    warn!("[Worker {}] Channel to Wazuh enriched log sender disconnected. Initiating shutdown.", worker_id);
+                                    break;
+                                }
+                            },
+                            Err(e) => {
+                                error!("[Worker {}] Failed to format enriched log for Wazuh: {}. Log: {:?}", worker_id, e, enriched_log_json);
+                            }
                         }
                     }
                     Err(e) => {
@@ -1557,7 +1744,8 @@ async fn elk_sender_thread(receiver: Receiver<String>, shutdown: Arc<AtomicBool>
             // tokio::net::TcpStream does not have set_write_timeout/set_read_timeout
             // relying on tokio::time::timeout for overall operation timeouts.
             info!("ELK sender: Successfully connected to ELK at {}.", addr);
-            tokio::spawn(send_telegram_message(format!( // Cloned String here
+            tokio::spawn(send_telegram_message(format!(
+                // Cloned String here
                 "✅ *Connection Established:* Successfully connected to ELK server at {}:{}.",
                 ELK_HOST, ELK_PORT
             )));
@@ -1568,14 +1756,16 @@ async fn elk_sender_thread(receiver: Receiver<String>, shutdown: Arc<AtomicBool>
                 "ELK sender: Initial connection to ELK failed: {}. Will retry as logs arrive.",
                 e
             );
-            tokio::spawn(send_telegram_message(format!( // Cloned String here
+            tokio::spawn(send_telegram_message(format!(
+                // Cloned String here
                 "🚨 *Initial ELK Connection Failed:* {}. Check firewall/connectivity.",
                 e
             )));
         }
         Err(_) => {
             error!("ELK sender: Initial connection to ELK timed out.");
-            tokio::spawn(send_telegram_message(format!( // Cloned String here
+            tokio::spawn(send_telegram_message(format!(
+                // Cloned String here
                 "🚨 *Initial ELK Connection Timed Out:* Check firewall/connectivity to {}:{}.",
                 ELK_HOST, ELK_PORT
             )));
@@ -1698,7 +1888,8 @@ async fn elk_sender_thread(receiver: Receiver<String>, shutdown: Arc<AtomicBool>
                         );
                         break;
                     }
-                    Err(e) => { // This is a tokio::task::JoinError if spawn_blocking panicked.
+                    Err(e) => {
+                        // This is a tokio::task::JoinError if spawn_blocking panicked.
                         error!("ELK sender: Error from blocking task: {}. Exiting thread loop.", e);
                         break;
                     }
@@ -1718,7 +1909,8 @@ async fn elk_sender_thread(receiver: Receiver<String>, shutdown: Arc<AtomicBool>
                 "ELK sender: Not connected. Waiting {}s before next reconnection attempt.",
                 retry_delay
             );
-            tokio::spawn(send_telegram_message(format!( // Cloned String here
+            tokio::spawn(send_telegram_message(format!(
+                // Cloned String here
                 "⚠️ *ELK Connection Lost:* Retrying in {}s. ELK Queue size: {}. Batch buffer: {}.",
                 retry_delay,
                 receiver.len(),
@@ -1735,8 +1927,10 @@ async fn elk_sender_thread(receiver: Receiver<String>, shutdown: Arc<AtomicBool>
             {
                 Ok(Ok(s)) => {
                     // tokio::net::TcpStream does not have set_write_timeout/set_read_timeout
+                    // relying on tokio::time::timeout for overall operation timeouts.
                     info!("ELK sender: Successfully reconnected to ELK.");
-                    tokio::spawn(send_telegram_message(format!( // Cloned String here
+                    tokio::spawn(send_telegram_message(format!(
+                        // Cloned String here
                         "✅ *Reconnected:* Successfully reconnected to ELK."
                     )));
                     stream = Some(s); // Set new stream.
@@ -1782,6 +1976,79 @@ async fn elk_sender_thread(receiver: Receiver<String>, shutdown: Arc<AtomicBool>
     info!("ELK sender task shut down gracefully.");
     Ok(())
 }
+
+// ==============================================================================
+// --- Wazuh Enhanced Syslog Sender Thread (Async) ---
+// This thread sends the enriched, formatted Fortigate logs to Wazuh.
+// ==============================================================================
+async fn wazuh_enhanced_syslog_sender_thread(
+    receiver: Receiver<String>, // Channel to receive formatted enriched logs.
+    shutdown: Arc<AtomicBool>,  // Atomic flag for graceful shutdown.
+) -> Result<()> {
+    info!("Wazuh enhanced syslog sender task started.");
+    let wazuh_syslog_addr: SocketAddr =
+        format!("{}:{}", WAZUH_LOCAL_SYSLOG_HOST, WAZUH_LOCAL_SYSLOG_PORT)
+            .parse()
+            .with_context(|| {
+                format!(
+                    "Failed to parse Wazuh local syslog address: {}:{}",
+                    WAZUH_LOCAL_SYSLOG_HOST, WAZUH_LOCAL_SYSLOG_PORT
+                )
+            })?;
+    let wazuh_socket = UdpSocket::bind("0.0.0.0:0") // Bind to any available local port
+        .await
+        .context("Failed to bind UDP socket for Wazuh forwarding")?;
+
+    info!(
+        "Wazuh enhanced log forwarding configured to {}.",
+        wazuh_syslog_addr
+    );
+
+    loop {
+        let receiver_clone_for_blocking = receiver.clone();
+        if shutdown.load(Ordering::Relaxed) && receiver.is_empty() {
+            info!("Wazuh enhanced syslog sender: Shutdown signal received and queue is empty.");
+            break;
+        }
+
+        match tokio::task::spawn_blocking(move || receiver_clone_for_blocking.recv_timeout(Duration::from_millis(100))).await {
+            Ok(Ok(log_message)) => {
+                debug!(
+                    "Wazuh enhanced syslog sender: Sending enhanced log to Wazuh ({} bytes). Queue size: {}",
+                    log_message.len(),
+                    receiver.len()
+                );
+                if let Err(e) = wazuh_socket.send_to(log_message.as_bytes(), wazuh_syslog_addr).await {
+                    error!(
+                        "Failed to forward enhanced log to Wazuh at {}: {}. Log: '{}'",
+                        wazuh_syslog_addr, e, log_message
+                    );
+                } else {
+                    debug!("Successfully forwarded enhanced log to Wazuh.");
+                }
+            },
+            Ok(Err(crossbeam_channel::RecvTimeoutError::Timeout)) => {
+                debug!("Wazuh enhanced syslog sender: No new logs in queue.");
+            },
+            Ok(Err(e)) => {
+                info!(
+                    "Wazuh enhanced syslog sender: Channel disconnected: {}. Exiting thread loop.",
+                    e
+                );
+                break;
+            },
+            Err(e) => { // This is a tokio::task::JoinError if spawn_blocking panicked.
+                error!("Wazuh enhanced syslog sender: Error from blocking task: {}. Exiting thread loop.", e);
+                break;
+            }
+        }
+    }
+    info!("Wazuh enhanced syslog sender task shut down gracefully.");
+    Ok(())
+}
+
+
+
 
 // ==============================================================================
 // --- Initial Connection Test (Async) ---
@@ -1863,7 +2130,7 @@ async fn main() -> Result<()> {
     };
 
     info!("==============================================");
-    info!("         Fortigate Raw Log Forwarder (Rust)   ");
+    info!("     Fortigate Raw Log Forwarder (Rust)     ");
     info!("==============================================");
     info!(
         "Service starting up in Belém, State of Pará, Brazil. Current time: {}",
@@ -1920,12 +2187,27 @@ async fn main() -> Result<()> {
         MAX_RECEIVER_QUEUE_SIZE
     );
 
+    // Channel from Syslog Receiver to Wazuh (raw logs)
+    let (wazuh_raw_tx, wazuh_raw_rx) = bounded(MAX_RECEIVER_QUEUE_SIZE);
+    info!(
+        "Created Wazuh raw log channel with max capacity: {} logs.",
+        MAX_RECEIVER_QUEUE_SIZE
+    );
+
     // Channel from Enrichment Workers to ELK Sender (enriched JSON logs)
     let (elk_tx, elk_rx) = bounded(MAX_ENRICHMENT_QUEUE_SIZE);
     info!(
         "Created ELK sender channel with max capacity: {} logs.",
         MAX_ENRICHMENT_QUEUE_SIZE
     );
+
+    // New Channel from Enrichment Workers to Wazuh (enriched, formatted logs)
+    let (wazuh_enriched_tx, wazuh_enriched_rx) = bounded(MAX_WAZUH_QUEUE_SIZE);
+    info!(
+        "Created Wazuh enriched log channel with max capacity: {} logs.",
+        MAX_WAZUH_QUEUE_SIZE
+    );
+
 
     // Channel from Enrichment Workers to State Merger (worker's AlertHistory clones)
     let (state_merger_tx, state_merger_rx) = bounded(ENRICHMENT_WORKER_COUNT * 2); // Buffer for history updates
@@ -1985,9 +2267,10 @@ async fn main() -> Result<()> {
     // --- Spawn Syslog Receiver Task (Async) ---
     let syslog_receiver_shutdown = shutdown.clone();
     let raw_log_tx_for_receiver = raw_log_tx.clone();
+    let wazuh_raw_tx_for_receiver = wazuh_raw_tx.clone(); // Pass this clone
     let syslog_receiver_handle = tokio::spawn(async move {
         if let Err(e) =
-            syslog_receiver_thread(raw_log_tx_for_receiver, syslog_receiver_shutdown).await
+            syslog_receiver_thread(raw_log_tx_for_receiver, wazuh_raw_tx_for_receiver, syslog_receiver_shutdown).await
         {
             error!("Syslog receiver task encountered a critical error: {}", e);
         }
@@ -2000,6 +2283,7 @@ async fn main() -> Result<()> {
     for i in 0..ENRICHMENT_WORKER_COUNT {
         let raw_log_rx_clone = raw_log_rx.clone();
         let elk_tx_clone = elk_tx.clone();
+        let wazuh_enriched_tx_clone = wazuh_enriched_tx.clone(); // Clone for each worker
         let intel_db_clone = threat_intel_db.clone();
         let state_merger_tx_clone = state_merger_tx.clone();
         let shutdown_clone = shutdown.clone();
@@ -2010,6 +2294,7 @@ async fn main() -> Result<()> {
                     i,
                     raw_log_rx_clone,
                     elk_tx_clone,
+                    wazuh_enriched_tx_clone, // Pass to enrichment worker
                     intel_db_clone,
                     state_merger_tx_clone,
                     shutdown_clone,
@@ -2038,12 +2323,88 @@ async fn main() -> Result<()> {
     });
     info!("ELK sender task spawned.");
 
+    // --- Spawn Wazuh Enhanced Syslog Sender Task (Async) ---
+    let wazuh_enhanced_sender_shutdown = shutdown.clone();
+    let wazuh_enhanced_sender_handle = tokio::spawn(async move {
+        if let Err(e) = wazuh_enhanced_syslog_sender_thread(wazuh_enriched_rx, wazuh_enhanced_sender_shutdown).await {
+            error!("Wazuh enhanced syslog sender task encountered a critical error: {}", e);
+        }
+        info!("Wazuh enhanced syslog sender task has exited.");
+    });
+    info!("Wazuh enhanced syslog sender task spawned.");
+
+
+    // --- Spawn Wazuh Raw Syslog Sender Thread (Async) ---
+    let wazuh_raw_sender_shutdown = shutdown.clone();
+    // Explicitly annotate the return type for clarity and to resolve ambiguity
+    let wazuh_raw_sender_handle: tokio::task::JoinHandle<Result<(), anyhow::Error>> = tokio::spawn(async move {
+        let wazuh_syslog_addr: SocketAddr =
+            format!("{}:{}", WAZUH_LOCAL_SYSLOG_HOST, WAZUH_LOCAL_SYSLOG_PORT)
+                .parse()
+                .with_context(|| {
+                    format!(
+                        "Failed to parse Wazuh local syslog address: {}:{}",
+                        WAZUH_LOCAL_SYSLOG_HOST, WAZUH_LOCAL_SYSLOG_PORT
+                    )
+                })?;
+        let wazuh_socket = UdpSocket::bind("0.0.0.0:0") // Bind to any available local port
+            .await
+            .context("Failed to bind UDP socket for Wazuh raw forwarding")?;
+
+        info!("Wazuh raw log forwarding configured to {}.", wazuh_syslog_addr);
+
+        loop {
+            let receiver_clone_for_blocking = wazuh_raw_rx.clone();
+            if wazuh_raw_sender_shutdown.load(Ordering::Relaxed) && wazuh_raw_rx.is_empty() {
+                info!("Wazuh raw syslog sender: Shutdown signal received and queue is empty.");
+                break;
+            }
+
+            match tokio::task::spawn_blocking(move || receiver_clone_for_blocking.recv_timeout(Duration::from_millis(100))).await {
+                Ok(Ok(log_message)) => {
+                    debug!(
+                        "Wazuh raw syslog sender: Sending raw log to Wazuh ({} bytes). Queue size: {}",
+                        log_message.len(),
+                        wazuh_raw_rx.len()
+                    );
+                    if let Err(e) = wazuh_socket.send_to(log_message.as_bytes(), wazuh_syslog_addr).await {
+                        error!(
+                            "Failed to forward raw log to Wazuh at {}: {}. Log: '{}'",
+                            wazuh_syslog_addr, e, log_message
+                        );
+                    } else {
+                        debug!("Successfully forwarded raw log to Wazuh.");
+                    }
+                },
+                Ok(Err(crossbeam_channel::RecvTimeoutError::Timeout)) => {
+                    debug!("Wazuh raw syslog sender: No new logs in queue.");
+                },
+                Ok(Err(e)) => {
+                    info!(
+                        "Wazuh raw syslog sender: Channel disconnected: {}. Exiting thread loop.",
+                        e
+                    );
+                    break;
+                },
+                Err(e) => { // This is a tokio::task::JoinError if spawn_blocking panicked.
+                    error!("Wazuh raw syslog sender: Error from blocking task: {}. Exiting thread loop.", e);
+                    break;
+                }
+            }
+        }
+        info!("Wazuh raw syslog sender task shut down gracefully.");
+        Ok(())
+    });
+    info!("Wazuh raw syslog sender task spawned.");
+
+
     // --- Main Thread Waits for Other Tasks/Threads ---
     info!("Main task waiting for syslog_receiver task to complete.");
     syslog_receiver_handle.await.unwrap();
 
     info!("Main task waiting for all enrichment worker threads to complete.");
     drop(raw_log_tx); // Close the original sender to signal workers to drain
+    drop(wazuh_raw_tx); // Close this sender too
     for handle in enrichment_handles {
         handle.join().unwrap();
     }
@@ -2052,9 +2413,21 @@ async fn main() -> Result<()> {
     drop(elk_tx); // Close the sender side of the elk channel to signal sender to finish
     elk_sender_handle.await.unwrap();
 
+    info!("Main task waiting for wazuh_enhanced_syslog_sender task to complete.");
+    drop(wazuh_enriched_tx); // Close the sender side of the wazuh enriched channel
+    wazuh_enhanced_sender_handle.await.unwrap();
+
+    info!("Main task waiting for wazuh_raw_syslog_sender task to complete.");
+    match wazuh_raw_sender_handle.await {
+        Ok(Ok(_)) => info!("Wazuh raw sender task completed successfully."),
+        Ok(Err(e)) => error!("Wazuh raw sender task failed with an error: {}", e),
+        Err(e) => error!("Wazuh raw sender task panicked: {}", e),
+    }
+
     info!("Main task waiting for state_merger thread to complete.");
     drop(state_merger_tx); // Close the sender side of the state merger channel
     state_merger_handle.join().unwrap();
+
 
     info!("All worker tasks/threads have finished. Service is performing final shutdown.");
     tokio::spawn(send_telegram_message(
