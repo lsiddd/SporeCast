@@ -3,7 +3,7 @@ use chrono::prelude::*;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use log::{debug, error, info, warn, LevelFilter};
 use regex::Regex;
-use reqwest::blocking::Client;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use signal_hook::{
@@ -13,16 +13,21 @@ use signal_hook::{
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
-    fs::{self, File, OpenOptions},
-    io::{self, Write},
-    net::{Ipv4Addr, SocketAddr, TcpStream, UdpSocket},
-    path::Path,
+    fs::{self, OpenOptions},
+    io::{self},
+    net::{Ipv4Addr, SocketAddr},
+    path::Path, // Added this import
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
     thread,
     time::{Duration, Instant},
+};
+use tokio::{
+    io::AsyncWriteExt, // Removed AsyncReadExt
+    net::{TcpStream, UdpSocket},
+    task::JoinSet,
 };
 
 // ==============================================================================
@@ -39,7 +44,7 @@ const WAZUH_LOCAL_SYSLOG_PORT: u16 = 1514; // The UDP port Wazuh will be reconfi
 
 const ELK_HOST: &str = "68.168.216.248"; // The IP address or hostname of the Logstash server in your ELK stack.
 const ELK_PORT: u16 = 5140; // The TCP port on which your Logstash service is listening.
-const SOCKET_TIMEOUT: u64 = 10; // Timeout in seconds for network socket operations (e.g., connecting to ELK).
+const SOCKET_TIMEOUT_SECS: u64 = 10; // Timeout in seconds for network socket operations (e.g., connecting to ELK).
 const LOG_FILE: &str = "/var/log/fortigate_forwarder.log"; // Path where the forwarder will write its own operational logs.
 const STATE_FILE: &str = "/var/lib/fortigate-forwarder/forwarder_state.json"; // Path to store the behavioral analysis state for persistence across restarts.
 const MAX_RECEIVER_QUEUE_SIZE: usize = 50000; // Max logs buffered between receiver and enrichment threads. Increased for high throughput.
@@ -52,7 +57,7 @@ const ELK_BATCH_FLUSH_INTERVAL_SECS: u64 = 1; // Max time to wait (in seconds) b
 const ENABLE_TELEGRAM: bool = true; // Set to `true` to enable Telegram status notifications.
 const TELEGRAM_TOKEN: &str = "YOUR_TELEGRAM_BOT_TOKEN"; // Your Telegram Bot Token from BotFather. **MUST BE REPLACED!**
 const TELEGRAM_CHAT_ID: &str = "YOUR_TELEGRAM_CHAT_ID"; // The chat ID to which the bot should send messages. **MUST BE REPLACED!**
-const HEARTBEAT_INTERVAL: u64 = 3600; // How often (in seconds) to send a heartbeat message to Telegram (e.g., 3600s = 1 hour).
+const HEARTBEAT_INTERVAL_SECS: u64 = 3600; // How often (in seconds) to send a heartbeat message to Telegram (e.g., 3600s = 1 hour).
 
 // --- Threat Intelligence Configuration ---
 const ENABLE_THREAT_INTEL_FEEDS: bool = true; // Set to `true` to enable external threat intelligence feed fetching and enrichment.
@@ -159,13 +164,15 @@ const CORRELATION_RULES: [(&str, &str); 10] = [
 // --- Threat Intelligence Database Structure ---
 // This struct holds all loaded threat intelligence indicators.
 // ==============================================================================
-#[derive(Serialize, Deserialize, Default, Clone)]
+// Removed Serialize/Deserialize derive here, as it conflicts with Arc fields
+// and this struct is not directly persisted via these traits anyway.
+#[derive(Default)]
 struct ThreatIntel {
-    malicious_ips: HashMap<String, Vec<String>>, // Stores malicious IPs and the list of feeds they appeared in.
-    malicious_domains: HashSet<String>,          // Stores unique malicious domains.
-    malicious_hashes: HashSet<String>,           // Stores unique malicious file hashes.
-    malicious_urls: HashSet<String>,             // Stores unique malicious URLs.
-    last_updated: DateTime<Utc>,                 // Timestamp of the last successful update.
+    malicious_ips: Arc<HashMap<String, Vec<String>>>, // Stores malicious IPs and the list of feeds they appeared in.
+    malicious_domains: Arc<HashSet<String>>,           // Stores unique malicious domains.
+    malicious_hashes: Arc<HashSet<String>>,            // Stores unique malicious file hashes.
+    malicious_urls: Arc<HashSet<String>>,              // Stores unique malicious URLs.
+    last_updated: DateTime<Utc>,                       // Timestamp of the last successful update.
 }
 
 impl ThreatIntel {
@@ -173,7 +180,10 @@ impl ThreatIntel {
     fn new() -> Self {
         ThreatIntel {
             last_updated: Utc::now(),
-            ..Default::default() // Initializes all HashMaps/HashSets as empty
+            malicious_ips: Arc::new(HashMap::new()),
+            malicious_domains: Arc::new(HashSet::new()),
+            malicious_hashes: Arc::new(HashSet::new()),
+            malicious_urls: Arc::new(HashSet::new()),
         }
     }
 
@@ -418,7 +428,7 @@ impl StateManager {
 // --- Telegram Notifications ---
 // Handles sending messages to a Telegram bot.
 // ==============================================================================
-fn send_telegram_message(message: &str) {
+async fn send_telegram_message(message: String) { // Changed to take String to own the message
     if !ENABLE_TELEGRAM {
         debug!(
             "Telegram notifications are disabled. Skipping message: {}",
@@ -442,7 +452,7 @@ fn send_telegram_message(message: &str) {
         ("text", &format!("[Fortigate-Forwarder]\n{}", message)),
         ("parse_mode", "Markdown"), // Allows basic formatting in Telegram messages.
     ];
-    if let Err(e) = client.post(&url).form(&params).send() {
+    if let Err(e) = client.post(&url).form(&params).send().await {
         error!(
             "Failed to send Telegram message: {}. Check token, chat ID, and network connectivity.",
             e
@@ -847,18 +857,23 @@ fn is_cache_valid(filepath: &str) -> bool {
 }
 
 // Downloads a threat intelligence feed from a given URL and caches it.
-fn download_feed(url: &str) -> Result<HashSet<String>> {
+async fn download_feed(url: &str) -> Result<HashSet<String>> {
     let cache_filepath = get_cache_filepath(url);
     if is_cache_valid(&cache_filepath) {
         info!("Using cached feed for {}.", url);
-        let file = File::open(&cache_filepath)
-            .with_context(|| format!("Failed to open cached feed file: {}", cache_filepath))?;
-        let items: HashSet<String> = serde_json::from_reader(file).with_context(|| {
-            format!(
-                "Failed to parse cached feed from {}. It might be corrupted.",
-                cache_filepath
-            )
-        })?;
+        // The tokio::fs::File::open().await already yields a tokio::fs::File.
+        // We need to move this into spawn_blocking immediately to convert and read.
+        let local_cache_filepath = cache_filepath.clone(); // Clone for the closure
+        let items: HashSet<String> = tokio::task::spawn_blocking(move || {
+            let file = std::fs::File::open(&local_cache_filepath)
+                .with_context(|| format!("Failed to open cached feed file: {}", local_cache_filepath))?;
+            serde_json::from_reader(file).with_context(|| {
+                format!("Failed to parse cached feed from {}. It might be corrupted.", local_cache_filepath)
+            })
+        })
+        .await
+        .with_context(|| format!("Blocking task failed for reading cache: {}", cache_filepath))??; // Note the double '??' for nested Result
+
         debug!("Loaded {} items from cache for {}.", items.len(), url);
         return Ok(items);
     }
@@ -869,6 +884,7 @@ fn download_feed(url: &str) -> Result<HashSet<String>> {
         .get(url)
         .timeout(Duration::from_secs(30))
         .send()
+        .await
         .with_context(|| format!("Failed to send HTTP request to {}", url))?;
     if !response.status().is_success() {
         return Err(anyhow!("HTTP error {} for {}", response.status(), url));
@@ -876,6 +892,7 @@ fn download_feed(url: &str) -> Result<HashSet<String>> {
 
     let text = response
         .text()
+        .await
         .with_context(|| format!("Failed to get response body from {}", url))?;
     let items: HashSet<String> = text
         .lines()
@@ -885,7 +902,7 @@ fn download_feed(url: &str) -> Result<HashSet<String>> {
         .collect();
 
     if let Some(parent) = Path::new(&cache_filepath).parent() {
-        fs::create_dir_all(parent).with_context(|| {
+        tokio::fs::create_dir_all(parent).await.with_context(|| {
             format!(
                 "Failed to create parent directory for cache file: {:?}",
                 parent
@@ -896,14 +913,23 @@ fn download_feed(url: &str) -> Result<HashSet<String>> {
             parent
         );
     }
-    let file = File::create(&cache_filepath)
-        .with_context(|| format!("Failed to create cache file: {}", cache_filepath))?;
-    serde_json::to_writer(file, &items).with_context(|| {
-        format!(
-            "Failed to write feed data to cache file: {}",
-            cache_filepath
-        )
-    })?;
+
+    // Now, create the file and write to it within a blocking task.
+    let items_clone = items.clone(); // Clone items to move into the blocking task
+    let local_cache_filepath_clone = cache_filepath.clone(); // Clone for the closure
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::create(&local_cache_filepath_clone)
+            .with_context(|| format!("Failed to create cache file: {}", local_cache_filepath_clone))?;
+        serde_json::to_writer(file, &items_clone).with_context(|| {
+            format!(
+                "Failed to write feed data to cache file: {}",
+                local_cache_filepath_clone
+            )
+        })
+    })
+    .await
+    .with_context(|| format!("Blocking task failed for writing cache: {}", cache_filepath))??; // Double '??' for nested Result
+
     info!(
         "Successfully downloaded and cached {} items from {}.",
         items.len(),
@@ -930,26 +956,43 @@ fn is_public_ip(ip_str: &str) -> bool {
 }
 
 // This thread is responsible for periodically updating the threat intelligence databases.
-fn threat_intel_updater_thread(intel_db: Arc<Mutex<ThreatIntel>>, shutdown: Arc<AtomicBool>) {
+async fn threat_intel_updater_thread(intel_db: Arc<Mutex<ThreatIntel>>, shutdown: Arc<AtomicBool>) {
     info!(
-        "Threat intelligence updater thread started. Will refresh every {} seconds.",
+        "Threat intelligence updater task started. Will refresh every {} seconds.",
         THREAT_INTEL_REFRESH_INTERVAL_SECS
     );
     // Initial sleep to allow other components to start up, and prevent immediate burst of downloads.
-    thread::sleep(Duration::from_secs(5));
+    tokio::time::sleep(Duration::from_secs(5)).await;
 
-    while !shutdown.load(Ordering::Relaxed) {
+    loop {
+        // Check for shutdown signal more frequently, without relying on long sleeps
+        if shutdown.load(Ordering::Relaxed) {
+            info!("Threat intel updater received shutdown signal.");
+            break;
+        }
+
         info!("Initiating threat intelligence database update cycle.");
-        send_telegram_message("⏳ Starting threat intelligence database update...");
+        tokio::spawn(send_telegram_message("⏳ Starting threat intelligence database update...".to_string()));
 
         let mut new_intel = ThreatIntel::new(); // Create a new intel object to build up.
+        let mut join_set = JoinSet::new();
 
         // --- Fetch Malicious IPs ---
         info!("Fetching malicious IP feeds...");
+        let ip_futures: Vec<_> = IP_FEED_URLS.iter().map(|url| {
+            let url_str = url.to_string();
+            async move {
+                (url_str.clone(), download_feed(&url_str).await)
+            }
+        }).collect();
+        for fut in ip_futures {
+            join_set.spawn(fut);
+        }
+
         let mut all_ips: HashMap<String, Vec<String>> = HashMap::new();
-        for url in IP_FEED_URLS.iter() {
-            match download_feed(url) {
-                Ok(items) => {
+        while let Some(res) = join_set.join_next().await {
+            match res {
+                Ok((url, Ok(items))) => {
                     info!("Successfully downloaded {} IPs from {}.", items.len(), url);
                     for ip in items {
                         if is_public_ip(&ip) {
@@ -959,70 +1002,66 @@ fn threat_intel_updater_thread(intel_db: Arc<Mutex<ThreatIntel>>, shutdown: Arc<
                         }
                     }
                 }
-                Err(e) => error!("Failed to download IP feed {}: {}", url, e),
+                Ok((url, Err(e))) => error!("Failed to download IP feed {}: {}", url, e),
+                Err(e) => error!("Join error in IP feed download: {}", e),
             }
         }
-        new_intel.malicious_ips = all_ips;
+        new_intel.malicious_ips = Arc::new(all_ips);
         info!(
             "Completed IP feed fetching. Loaded {} unique public malicious IPs.",
             new_intel.malicious_ips.len()
         );
 
-        // --- Fetch Malicious URLs ---
-        info!("Fetching malicious URL feeds...");
-        let mut all_urls = HashSet::new();
+        // --- Fetch other feeds concurrently using a new JoinSet ---
+        let mut other_join_set = JoinSet::new();
+
         for url in URL_FEED_URLS.iter() {
-            match download_feed(url) {
-                Ok(items) => {
-                    info!("Successfully downloaded {} URLs from {}.", items.len(), url);
-                    all_urls.extend(items)
+            let url_str = url.to_string();
+            other_join_set.spawn(async move {
+                (url_str.clone(), download_feed(&url_str).await, "url")
+            });
+        }
+        for url in HASH_FEED_URLS.iter() {
+            let url_str = url.to_string();
+            other_join_set.spawn(async move {
+                (url_str.clone(), download_feed(&url_str).await, "hash")
+            });
+        }
+        for url in DOMAIN_FEED_URLS.iter() {
+            let url_str = url.to_string();
+            other_join_set.spawn(async move {
+                (url_str.clone(), download_feed(&url_str).await, "domain")
+            });
+        }
+
+        while let Some(res) = other_join_set.join_next().await {
+            match res {
+                Ok((url, Ok(items), feed_type)) => {
+                    info!("Successfully downloaded {} {}s from {}.", items.len(), feed_type, url);
+                    // Update new_intel directly, not the shared one until fully built.
+                    let target_arc_ref = match feed_type {
+                        "url" => &mut new_intel.malicious_urls,
+                        "hash" => &mut new_intel.malicious_hashes,
+                        "domain" => &mut new_intel.malicious_domains,
+                        _ => unreachable!(), // Should not happen with current logic
+                    };
+                    // Replace the Arc with a new one that contains the extended items
+                    let mut current_map = (**target_arc_ref).clone(); // Clone the inner map/set
+                    current_map.extend(items);
+                    *target_arc_ref = Arc::new(current_map);
                 }
-                Err(e) => error!("Failed to download URL feed {}: {}", url, e),
+                Ok((url, Err(e), feed_type)) => error!("Failed to download {} feed {}: {}", feed_type, url, e),
+                Err(e) => error!("Join error in other feed download: {}", e),
             }
         }
-        new_intel.malicious_urls = all_urls;
         info!(
             "Completed URL feed fetching. Loaded {} malicious URLs.",
             new_intel.malicious_urls.len()
         );
-
-        // --- Fetch Malicious Hashes ---
-        info!("Fetching malicious Hash feeds...");
-        for url in HASH_FEED_URLS.iter() {
-            match download_feed(url) {
-                Ok(items) => {
-                    info!(
-                        "Successfully downloaded {} Hashes from {}.",
-                        items.len(),
-                        url
-                    );
-                    new_intel.malicious_hashes.extend(items)
-                }
-                Err(e) => error!("Failed to download hash feed {}: {}", url, e),
-            }
-        }
         info!(
             "Completed Hash feed fetching. Loaded {} malicious hashes.",
             new_intel.malicious_hashes.len()
         );
-
-        // --- Fetch Malicious Domains ---
-        info!("Fetching malicious Domain feeds...");
-        let mut all_domains = HashSet::new();
-        for url in DOMAIN_FEED_URLS.iter() {
-            match download_feed(url) {
-                Ok(items) => {
-                    info!(
-                        "Successfully downloaded {} Domains from {}.",
-                        items.len(),
-                        url
-                    );
-                    all_domains.extend(items)
-                }
-                Err(e) => error!("Failed to download domain feed {}: {}", url, e),
-            }
-        }
-        new_intel.malicious_domains = all_domains;
         info!(
             "Completed Domain feed fetching. Loaded {} malicious domains.",
             new_intel.malicious_domains.len()
@@ -1033,30 +1072,31 @@ fn threat_intel_updater_thread(intel_db: Arc<Mutex<ThreatIntel>>, shutdown: Arc<
 
         // Acquire a lock on the shared threat intelligence database and update it.
         info!("Acquiring lock on shared threat intelligence database for update.");
-        *intel_db.lock().unwrap() = new_intel;
+        *intel_db.lock().unwrap() = new_intel; // This will replace the old Arc'd data with new Arc'd data.
         info!(
             "Threat intelligence databases updated. Total indicators: {}",
             total_indicators
         );
-        send_telegram_message(&format!(
+        tokio::spawn(send_telegram_message(format!( // Cloned String here
             "✅ Threat intelligence databases updated. Total indicators loaded: {}.",
             total_indicators
-        ));
+        )));
 
         // Sleep until next refresh, but check shutdown flag every second.
         debug!(
             "Threat intelligence updater sleeping for {} seconds until next refresh.",
             THREAT_INTEL_REFRESH_INTERVAL_SECS
         );
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
         for _ in 0..THREAT_INTEL_REFRESH_INTERVAL_SECS {
+            interval.tick().await; // Wait for the next tick, non-blocking
             if shutdown.load(Ordering::Relaxed) {
                 info!("Threat intel updater received shutdown signal during sleep.");
                 break;
             }
-            thread::sleep(Duration::from_secs(1));
         }
     }
-    info!("Threat intelligence updater thread shutting down gracefully.");
+    info!("Threat intelligence updater task shutting down gracefully.");
 }
 
 // ==============================================================================
@@ -1196,26 +1236,23 @@ fn parse_fortigate_log_to_json(raw_log: &str) -> Result<Value> {
 }
 
 // ==============================================================================
-// --- Syslog Receiver Thread ---
+// --- Syslog Receiver Thread (Async) ---
 // This thread binds to a UDP port and listens for incoming Fortigate Syslog messages.
 // It then forwards a raw copy to Wazuh and sends a raw copy to the enrichment worker pool.
 // ==============================================================================
-fn syslog_receiver_thread(
+async fn syslog_receiver_thread(
     enrichment_tx: Sender<String>, // Channel to send raw logs to enrichment threads.
     shutdown: Arc<AtomicBool>,     // Atomic flag for graceful shutdown.
 ) -> Result<()> {
     info!(
-        "Syslog receiver thread starting. Will bind to UDP port {}.",
+        "Syslog receiver task starting. Will bind to UDP port {}.",
         FORTIGATE_SYSLOG_PORT
     );
     let bind_addr = format!("0.0.0.0:{}", FORTIGATE_SYSLOG_PORT);
     let socket = UdpSocket::bind(&bind_addr)
+        .await
         .with_context(|| format!("Failed to bind UDP socket to {}. This likely means another process (like Wazuh) is already listening on this port. Please reconfigure Wazuh to listen on a different port (e.g., 1514) and ensure this application is the only one on {}.", bind_addr, FORTIGATE_SYSLOG_PORT))?;
 
-    // Set a read timeout to prevent blocking indefinitely, allowing the thread to check the shutdown flag.
-    socket
-        .set_read_timeout(Some(Duration::from_secs(1)))
-        .context("Failed to set read timeout on UDP socket")?;
     info!("Successfully bound UDP socket to {}.", bind_addr);
 
     // Prepare the UDP socket for forwarding raw logs to Wazuh
@@ -1229,75 +1266,80 @@ fn syslog_receiver_thread(
                 )
             })?;
     let wazuh_forward_socket = UdpSocket::bind("0.0.0.0:0") // Bind to any available local port
+        .await
         .context("Failed to bind UDP socket for Wazuh forwarding")?;
     info!(
         "Wazuh raw log forwarding configured to {}.",
         wazuh_syslog_addr
     );
 
-    let mut buf = [0; 2048]; // Buffer for incoming UDP packets. Standard Syslog messages are usually <= 1024 bytes.
+    let mut buf = [0; 2048]; // Buffer for incoming UDP packets.
 
-    while !shutdown.load(Ordering::Relaxed) {
-        debug!("Syslog receiver: Waiting for incoming UDP packets.");
-        match socket.recv_from(&mut buf) {
-            Ok((len, src_addr)) => {
-                let raw_log_bytes = &buf[..len];
-                let raw_log = String::from_utf8_lossy(raw_log_bytes).trim().to_string();
-                if raw_log.is_empty() {
-                    debug!("Received empty UDP packet from {}. Skipping.", src_addr);
-                    continue;
-                }
-                info!(
-                    "Received raw Fortigate log ({} bytes) from {}.",
-                    len, src_addr
-                );
-                debug!("Raw log content: '{}'", raw_log);
-
-                // --- FORWARD RAW LOG TO WAZUH ---
-                debug!(
-                    "Attempting to forward raw log to Wazuh at {}.",
-                    wazuh_syslog_addr
-                );
-                if let Err(e) = wazuh_forward_socket.send_to(raw_log_bytes, wazuh_syslog_addr) {
-                    error!(
-                        "Failed to forward raw log to Wazuh at {}: {}. Raw log: '{}'",
-                        wazuh_syslog_addr, e, raw_log
-                    );
-                } else {
-                    debug!(
-                        "Successfully forwarded raw log to Wazuh at {}.",
-                        wazuh_syslog_addr
-                    );
-                }
-
-                // --- Send RAW LOG to ENRICHMENT WORKERS ---
-                debug!(
-                    "Sending raw log to enrichment channel. Queue size: {}",
-                    enrichment_tx.len()
-                );
-                if enrichment_tx.send(raw_log).is_err() {
-                    warn!("Channel to enrichment workers disconnected. Initiating shutdown of syslog receiver thread.");
-                    break; // Exit loop if sender channel is closed.
-                }
+    loop {
+        let shutdown_clone_for_select = shutdown.clone(); // Clone for each select iteration
+        tokio::select! {
+            // Prioritize shutdown over receiving data
+            _ = tokio::time::sleep(Duration::from_millis(100)), if shutdown_clone_for_select.load(Ordering::Relaxed) => {
+                info!("Syslog receiver: Shutdown signal received.");
+                break;
             }
-            Err(ref e)
-                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
-            {
-                // No data received within the timeout. This is expected and allows checking the shutdown flag.
-                debug!("Syslog receiver: No data within timeout, re-checking shutdown flag.");
-                continue;
-            }
-            Err(e) => {
-                error!(
-                    "Critical error receiving UDP packet: {}. Waiting 5 seconds before retrying.",
-                    e
-                );
-                thread::sleep(Duration::from_secs(5)); // Wait a bit before retrying on other errors.
+            // Attempt to receive a UDP packet
+            result = socket.recv_from(&mut buf) => {
+                match result {
+                    Ok((len, src_addr)) => {
+                        let raw_log_bytes = &buf[..len];
+                        let raw_log = String::from_utf8_lossy(raw_log_bytes).trim().to_string();
+                        if raw_log.is_empty() {
+                            debug!("Received empty UDP packet from {}. Skipping.", src_addr);
+                            continue;
+                        }
+                        info!(
+                            "Received raw Fortigate log ({} bytes) from {}.",
+                            len, src_addr
+                        );
+                        debug!("Raw log content: '{}'", raw_log);
+
+                        // --- FORWARD RAW LOG TO WAZUH ---
+                        debug!(
+                            "Attempting to forward raw log to Wazuh at {}.",
+                            wazuh_syslog_addr
+                        );
+                        if let Err(e) = wazuh_forward_socket.send_to(raw_log_bytes, wazuh_syslog_addr).await {
+                            error!(
+                                "Failed to forward raw log to Wazuh at {}: {}. Raw log: '{}'",
+                                wazuh_syslog_addr, e, raw_log
+                            );
+                        } else {
+                            debug!(
+                                "Successfully forwarded raw log to Wazuh at {}.",
+                                wazuh_syslog_addr
+                            );
+                        }
+
+                        // --- Send RAW LOG to ENRICHMENT WORKERS ---
+                        debug!(
+                            "Sending raw log to enrichment channel. Queue size: {}",
+                            enrichment_tx.len()
+                        );
+                        if enrichment_tx.send(raw_log).is_err() {
+                            warn!("Channel to enrichment workers disconnected. Initiating shutdown of syslog receiver task.");
+                            break; // Exit loop if sender channel is closed.
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            "Critical error receiving UDP packet: {}. Waiting 1 second before retrying.",
+                            e
+                        );
+                        // On error, wait briefly before retrying to prevent busy-looping
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
             }
         }
     }
 
-    info!("Syslog receiver thread received shutdown signal. Exiting loop.");
+    info!("Syslog receiver task received shutdown signal. Exiting loop.");
     Ok(())
 }
 
@@ -1310,7 +1352,7 @@ fn syslog_receiver_thread(
 fn enrichment_worker_thread(
     worker_id: usize,
     raw_log_rx: Receiver<String>, // Channel to receive raw logs from syslog receiver.
-    elk_tx: Sender<String>,       // Channel to send processed JSON logs to ELK sender.
+    elk_tx: Sender<String>,        // Channel to send processed JSON logs to ELK sender.
     threat_intel_db: Arc<Mutex<ThreatIntel>>, // Shared Threat Intelligence database (read-only access).
     state_merger_tx: Sender<AlertHistory>,    // Channel to send worker's AlertHistory for merging.
     shutdown: Arc<AtomicBool>,                // Atomic flag for graceful shutdown.
@@ -1322,8 +1364,15 @@ fn enrichment_worker_thread(
 
     while !shutdown.load(Ordering::Relaxed) || !raw_log_rx.is_empty() {
         // Acquire lock once per iteration, then clone the Arc for processing
+        // This is still a mutex, but the clone on ThreatIntel is now cheap (Arc clone)
         let intel_guard = threat_intel_db.lock().unwrap();
-        let intel = Arc::new(intel_guard.clone()); // Clone the Arc for immutability during processing
+        let intel = Arc::new(ThreatIntel {
+            malicious_ips: intel_guard.malicious_ips.clone(),
+            malicious_domains: intel_guard.malicious_domains.clone(),
+            malicious_hashes: intel_guard.malicious_hashes.clone(),
+            malicious_urls: intel_guard.malicious_urls.clone(),
+            last_updated: intel_guard.last_updated,
+        });
         drop(intel_guard); // Release the mutex lock early
 
         match raw_log_rx.recv_timeout(Duration::from_millis(100)) {
@@ -1474,12 +1523,12 @@ fn state_merger_thread(
 }
 
 // ==============================================================================
-// --- ELK Sender Thread ---
+// --- ELK Sender Thread (Async) ---
 // This thread connects to the ELK (Logstash) server and sends processed JSON logs.
 // It handles reconnection logic and sends periodic heartbeats.
 // ==============================================================================
-fn elk_sender_thread(receiver: Receiver<String>, shutdown: Arc<AtomicBool>) -> Result<()> {
-    info!("ELK sender thread started.");
+async fn elk_sender_thread(receiver: Receiver<String>, shutdown: Arc<AtomicBool>) -> Result<()> {
+    info!("ELK sender task started.");
     let addr: SocketAddr = format!("{}:{}", ELK_HOST, ELK_PORT)
         .parse()
         .with_context(|| {
@@ -1498,36 +1547,48 @@ fn elk_sender_thread(receiver: Receiver<String>, shutdown: Arc<AtomicBool>) -> R
 
     // Attempt initial connection to ELK.
     debug!("ELK sender: Attempting initial connection to {}.", addr);
-    match TcpStream::connect_timeout(&addr, Duration::from_secs(SOCKET_TIMEOUT)) {
-        Ok(s) => {
-            s.set_write_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT)))
-                .context("Failed to set write timeout on ELK TCP stream")?;
-            s.set_read_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT)))
-                .context("Failed to set read timeout on ELK TCP stream")?;
+    match tokio::time::timeout(
+        Duration::from_secs(SOCKET_TIMEOUT_SECS),
+        TcpStream::connect(&addr),
+    )
+    .await
+    {
+        Ok(Ok(s)) => {
+            // tokio::net::TcpStream does not have set_write_timeout/set_read_timeout
+            // relying on tokio::time::timeout for overall operation timeouts.
             info!("ELK sender: Successfully connected to ELK at {}.", addr);
-            send_telegram_message(&format!(
+            tokio::spawn(send_telegram_message(format!( // Cloned String here
                 "✅ *Connection Established:* Successfully connected to ELK server at {}:{}.",
                 ELK_HOST, ELK_PORT
-            ));
+            )));
             stream = Some(s);
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             error!(
                 "ELK sender: Initial connection to ELK failed: {}. Will retry as logs arrive.",
                 e
             );
-            send_telegram_message(&format!(
+            tokio::spawn(send_telegram_message(format!( // Cloned String here
                 "🚨 *Initial ELK Connection Failed:* {}. Check firewall/connectivity.",
                 e
-            ));
+            )));
+        }
+        Err(_) => {
+            error!("ELK sender: Initial connection to ELK timed out.");
+            tokio::spawn(send_telegram_message(format!( // Cloned String here
+                "🚨 *Initial ELK Connection Timed Out:* Check firewall/connectivity to {}:{}.",
+                ELK_HOST, ELK_PORT
+            )));
         }
     };
 
     // Helper function to send the current batch
-    let send_batch = |stream: &mut TcpStream,
-                      buffer: &mut Vec<String>,
-                      logs_processed_count: &mut u64|
-        -> Result<()> {
+    // Define this as a nested async function, not a closure, for easier mutable reference handling.
+    async fn send_batch(
+        stream: &mut TcpStream,
+        buffer: &mut Vec<String>,
+        logs_processed_count: &mut u64,
+    ) -> Result<()> {
         if buffer.is_empty() {
             return Ok(());
         }
@@ -1537,19 +1598,28 @@ fn elk_sender_thread(receiver: Receiver<String>, shutdown: Arc<AtomicBool>) -> R
             buffer.len(),
             payload.len()
         );
-        stream.write_all(payload.as_bytes())?;
+        stream.write_all(payload.as_bytes()).await.context("Failed to write to ELK TCP stream")?;
         *logs_processed_count += buffer.len() as u64;
         buffer.clear();
         Ok(())
-    };
+    }
 
-    while !shutdown.load(Ordering::Relaxed) || !receiver.is_empty() || !batch_buffer.is_empty() {
+    loop {
+        // Clone receiver for this loop iteration's spawn_blocking
+        let receiver_clone_for_blocking = receiver.clone();
+
+        // Check shutdown flag
+        if shutdown.load(Ordering::Relaxed) && receiver.is_empty() && batch_buffer.is_empty() {
+            info!("ELK sender: Shutdown signal received and queues are empty.");
+            break;
+        }
+
         // Send a heartbeat message periodically.
-        if last_heartbeat.elapsed().as_secs() >= HEARTBEAT_INTERVAL {
+        if last_heartbeat.elapsed().as_secs() >= HEARTBEAT_INTERVAL_SECS {
             let message = format!("❤️ *Heartbeat:* Service is alive. {} logs forwarded since last heartbeat. ELK Queue size: {}. Batch buffer: {}.",
-                                     logs_processed_since_heartbeat, receiver.len(), batch_buffer.len());
-            send_telegram_message(&message);
-            info!("{}", message);
+                                 logs_processed_since_heartbeat, receiver.len(), batch_buffer.len());
+            tokio::spawn(send_telegram_message(message.clone())); // Cloned String here for info!
+            info!("{}", message); // `message` is still available here
             logs_processed_since_heartbeat = 0; // Reset counter.
             last_heartbeat = Instant::now(); // Reset timer.
         }
@@ -1565,66 +1635,80 @@ fn elk_sender_thread(receiver: Receiver<String>, shutdown: Arc<AtomicBool>) -> R
             remaining_time.min(Duration::from_millis(100)) // Poll more frequently for batching
         };
 
-        match receiver.recv_timeout(recv_timeout) {
-            Ok(message) => {
-                debug!(
-                    "ELK sender: Received log from channel. ELK Queue size remaining: {}",
-                    receiver.len()
-                );
-                batch_buffer.push(message);
-
-                if batch_buffer.len() >= ELK_BATCH_SIZE {
-                    debug!(
-                        "Batch buffer full ({} logs). Flushing to ELK.",
-                        batch_buffer.len()
-                    );
-                    if let Some(ref mut s) = stream {
-                        if let Err(e) =
-                            send_batch(s, &mut batch_buffer, &mut logs_processed_since_heartbeat)
-                        {
-                            warn!("ELK sender: Failed to send batch to TCP stream: {}. Connection might be broken. Attempting to reconnect.", e);
-                            stream = None; // Mark stream as broken.
-                        }
-                    } else {
-                        debug!("ELK sender: No active connection, holding batch in buffer.");
-                    }
-                    last_batch_flush = Instant::now();
-                }
-            }
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                // No messages in the queue for the timeout duration.
-                // Check if it's time to flush partial batch.
-                if !batch_buffer.is_empty()
-                    && last_batch_flush.elapsed().as_secs() >= ELK_BATCH_FLUSH_INTERVAL_SECS
-                {
-                    debug!(
-                        "ELK sender: Flushing partial batch ({} logs) due to timeout.",
-                        batch_buffer.len()
-                    );
-                    if let Some(ref mut s) = stream {
-                        if let Err(e) =
-                            send_batch(s, &mut batch_buffer, &mut logs_processed_since_heartbeat)
-                        {
-                            warn!("ELK sender: Failed to send partial batch to TCP stream: {}. Connection might be broken. Attempting to reconnect.", e);
-                            stream = None; // Mark stream as broken.
-                        }
-                    } else {
+        tokio::select! {
+            // Prioritize receiving messages from the channel
+            result = tokio::task::spawn_blocking(move || receiver_clone_for_blocking.recv_timeout(recv_timeout)) => {
+                match result {
+                    Ok(Ok(message)) => {
                         debug!(
-                            "ELK sender: No active connection, holding partial batch in buffer."
+                            "ELK sender: Received log from channel. ELK Queue size remaining: {}",
+                            receiver.len()
                         );
+                        batch_buffer.push(message);
+
+                        if batch_buffer.len() >= ELK_BATCH_SIZE {
+                            debug!(
+                                "Batch buffer full ({} logs). Flushing to ELK.",
+                                batch_buffer.len()
+                            );
+                            if let Some(s) = stream.as_mut() {
+                                if let Err(e) =
+                                    send_batch(s, &mut batch_buffer, &mut logs_processed_since_heartbeat).await
+                                {
+                                    warn!("ELK sender: Failed to send batch to TCP stream: {}. Connection might be broken. Attempting to reconnect.", e);
+                                    stream = None; // Mark stream as broken.
+                                }
+                            } else {
+                                debug!("ELK sender: No active connection, holding batch in buffer.");
+                            }
+                            last_batch_flush = Instant::now();
+                        }
                     }
-                    last_batch_flush = Instant::now();
+                    Ok(Err(crossbeam_channel::RecvTimeoutError::Timeout)) => {
+                        // No messages in the queue for the timeout duration.
+                        // Check if it's time to flush partial batch.
+                        if !batch_buffer.is_empty()
+                            && last_batch_flush.elapsed().as_secs() >= ELK_BATCH_FLUSH_INTERVAL_SECS
+                        {
+                            debug!(
+                                "ELK sender: Flushing partial batch ({} logs) due to timeout.",
+                                batch_buffer.len()
+                            );
+                            if let Some(s) = stream.as_mut() {
+                                if let Err(e) =
+                                    send_batch(s, &mut batch_buffer, &mut logs_processed_since_heartbeat).await
+                                {
+                                    warn!("ELK sender: Failed to send partial batch to TCP stream: {}. Connection might be broken. Attempting to reconnect.", e);
+                                    stream = None; // Mark stream as broken.
+                                }
+                            } else {
+                                debug!(
+                                    "ELK sender: No active connection, holding partial batch in buffer."
+                                );
+                            }
+                            last_batch_flush = Instant::now();
+                        }
+                        debug!("ELK sender: No data in queue for timeout. Checking shutdown status.");
+                    }
+                    Ok(Err(e)) => {
+                        // The channel has disconnected (e.g., sender thread terminated).
+                        info!(
+                            "ELK sender: Channel to receiver disconnected: {}. Exiting thread loop.",
+                            e
+                        );
+                        break;
+                    }
+                    Err(e) => { // This is a tokio::task::JoinError if spawn_blocking panicked.
+                        error!("ELK sender: Error from blocking task: {}. Exiting thread loop.", e);
+                        break;
+                    }
                 }
-                debug!("ELK sender: No data in queue for timeout. Checking shutdown status.");
-                continue; // Continue looping to check shutdown flag.
             }
-            Err(e) => {
-                // The channel has disconnected (e.g., sender thread terminated).
-                info!(
-                    "ELK sender: Channel to receiver disconnected: {}. Exiting thread loop.",
-                    e
-                );
-                break;
+            // Allow polling for the shutdown signal and checking the buffer even when `recv_timeout` doesn't yield.
+            _ = tokio::time::sleep(Duration::from_millis(100)), if !shutdown.load(Ordering::Relaxed) => {
+                // This branch helps ensure the loop doesn't get stuck if `recv_timeout` is very long
+                // and no messages arrive, but a shutdown signal is sent.
+                continue;
             }
         }
 
@@ -1634,39 +1718,44 @@ fn elk_sender_thread(receiver: Receiver<String>, shutdown: Arc<AtomicBool>) -> R
                 "ELK sender: Not connected. Waiting {}s before next reconnection attempt.",
                 retry_delay
             );
-            send_telegram_message(&format!(
+            tokio::spawn(send_telegram_message(format!( // Cloned String here
                 "⚠️ *ELK Connection Lost:* Retrying in {}s. ELK Queue size: {}. Batch buffer: {}.",
                 retry_delay,
                 receiver.len(),
                 batch_buffer.len()
-            ));
-            thread::sleep(Duration::from_secs(retry_delay)); // Wait before retrying.
+            )));
+            tokio::time::sleep(Duration::from_secs(retry_delay)).await; // Wait before retrying.
 
             debug!("ELK sender: Attempting to reconnect to ELK at {}.", addr);
-            match TcpStream::connect_timeout(&addr, Duration::from_secs(SOCKET_TIMEOUT)) {
-                Ok(s) => {
-                    s.set_write_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT)))
-                        .context(
-                            "Failed to set write timeout on ELK TCP stream during reconnection",
-                        )?;
-                    s.set_read_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT)))
-                        .context(
-                            "Failed to set read timeout on ELK TCP stream during reconnection",
-                        )?;
+            match tokio::time::timeout(
+                Duration::from_secs(SOCKET_TIMEOUT_SECS),
+                TcpStream::connect(&addr),
+            )
+            .await
+            {
+                Ok(Ok(s)) => {
+                    // tokio::net::TcpStream does not have set_write_timeout/set_read_timeout
                     info!("ELK sender: Successfully reconnected to ELK.");
-                    send_telegram_message(&format!(
+                    tokio::spawn(send_telegram_message(format!( // Cloned String here
                         "✅ *Reconnected:* Successfully reconnected to ELK."
-                    ));
+                    )));
                     stream = Some(s); // Set new stream.
                     retry_delay = 5; // Reset delay.
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     error!(
                         "ELK sender: Reconnection to ELK failed: {}. Next retry in {}s.",
                         e,
                         std::cmp::min(retry_delay * 2, 60)
                     );
                     retry_delay = std::cmp::min(retry_delay * 2, 60); // Exponential backoff, max 60s.
+                }
+                Err(_) => {
+                    error!(
+                        "ELK sender: Reconnection to ELK timed out. Next retry in {}s.",
+                        std::cmp::min(retry_delay * 2, 60)
+                    );
+                    retry_delay = std::cmp::min(retry_delay * 2, 60);
                 }
             }
         }
@@ -1678,8 +1767,8 @@ fn elk_sender_thread(receiver: Receiver<String>, shutdown: Arc<AtomicBool>) -> R
             "ELK sender: Flushing remaining {} logs in buffer before shutting down.",
             batch_buffer.len()
         );
-        if let Some(ref mut s) = stream {
-            if let Err(e) = send_batch(s, &mut batch_buffer, &mut logs_processed_since_heartbeat) {
+        if let Some(s) = stream.as_mut() {
+            if let Err(e) = send_batch(s, &mut batch_buffer, &mut logs_processed_since_heartbeat).await {
                 error!("ELK sender: Failed to flush final batch: {}", e);
             }
         } else {
@@ -1687,18 +1776,18 @@ fn elk_sender_thread(receiver: Receiver<String>, shutdown: Arc<AtomicBool>) -> R
         }
     }
 
-    info!("ELK sender thread received shutdown signal or queue is empty. Flushing remaining logs and shutting down.");
+    info!("ELK sender task received shutdown signal or queue is empty. Flushing remaining logs and shutting down.");
     // Small final delay to ensure any last-moment writes complete.
-    thread::sleep(Duration::from_millis(100));
-    info!("ELK sender thread shut down gracefully.");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    info!("ELK sender task shut down gracefully.");
     Ok(())
 }
 
 // ==============================================================================
-// --- Initial Connection Test ---
+// --- Initial Connection Test (Async) ---
 // Performs a quick test to ensure the ELK server is reachable at startup.
 // ==============================================================================
-fn test_initial_connection() -> Result<()> {
+async fn test_initial_connection() -> Result<()> {
     info!(
         "Performing initial connection test to ELK at {}:{}...",
         ELK_HOST, ELK_PORT
@@ -1712,16 +1801,22 @@ fn test_initial_connection() -> Result<()> {
             )
         })?;
 
-    match TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
-        Ok(_) => {
+    match tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(&addr)).await {
+        Ok(Ok(_)) => {
             info!("✅ Initial ELK connection test successful. ELK is reachable.");
             Ok(())
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             let msg = format!("🚨 Initial ELK connection test FAILED: {}\nCheck firewall rules, ELK server status, and connectivity to {}:{}", e, ELK_HOST, ELK_PORT);
             error!("{}", msg);
-            send_telegram_message(&msg); // Send critical error to Telegram.
-            Err(anyhow!(msg)) // Return an error to propagate the failure.
+            tokio::spawn(send_telegram_message(msg.clone())); // Pass owned String
+            Err(anyhow!(msg)) // Pass owned String
+        }
+        Err(_) => {
+            let msg = format!("🚨 Initial ELK connection test TIMED OUT.\nCheck firewall rules, ELK server status, and connectivity to {}:{}.", ELK_HOST, ELK_PORT);
+            error!("{}", msg);
+            tokio::spawn(send_telegram_message(msg.clone())); // Pass owned String
+            Err(anyhow!(msg)) // Pass owned String
         }
     }
 }
@@ -1731,7 +1826,8 @@ fn test_initial_connection() -> Result<()> {
 // The entry point of the Fortigate Log Forwarder application.
 // Initializes logging, sets up threads, and manages graceful shutdown.
 // ==============================================================================
-fn main() -> Result<()> {
+#[tokio::main] // Use tokio's main macro for async entry point
+async fn main() -> Result<()> {
     // --- Logging Setup ---
     // Attempts to open the log file for appending. If it fails, logs to stdout only.
     let log_file_result = OpenOptions::new().create(true).append(true).open(LOG_FILE);
@@ -1767,7 +1863,7 @@ fn main() -> Result<()> {
     };
 
     info!("==============================================");
-    info!("        Fortigate Raw Log Forwarder (Rust)    ");
+    info!("         Fortigate Raw Log Forwarder (Rust)   ");
     info!("==============================================");
     info!(
         "Service starting up in Belém, State of Pará, Brazil. Current time: {}",
@@ -1788,7 +1884,7 @@ fn main() -> Result<()> {
 
     // Perform an initial connection test to ELK.
     // The service can proceed even if this fails, as the sender thread has reconnection logic.
-    if let Err(e) = test_initial_connection() {
+    if let Err(e) = test_initial_connection().await {
         warn!(
             "Initial ELK connection test failed. Service will attempt to reconnect as needed: {}",
             e
@@ -1857,18 +1953,16 @@ fn main() -> Result<()> {
     let threat_intel_db = Arc::new(Mutex::new(ThreatIntel::new()));
     info!("Threat intelligence database initialized.");
 
-    // --- Spawn Threat Intelligence Updater Thread ---
+    // --- Spawn Threat Intelligence Updater Task (Async) ---
     if ENABLE_THREAT_INTEL_FEEDS {
         let intel_clone = threat_intel_db.clone();
         let shutdown_clone = shutdown.clone();
-        thread::Builder::new()
-            .name("intel_updater".to_string())
-            .spawn(move || {
-                threat_intel_updater_thread(intel_clone, shutdown_clone);
-            })?;
-        info!("Threat intelligence updater thread spawned.");
+        tokio::spawn(async move {
+            threat_intel_updater_thread(intel_clone, shutdown_clone).await;
+        });
+        info!("Threat intelligence updater task spawned.");
     } else {
-        info!("Threat intelligence feed fetching is disabled by configuration. No updater thread spawned.");
+        info!("Threat intelligence feed fetching is disabled by configuration. No updater task spawned.");
     }
 
     // --- Spawn State Merger Thread ---
@@ -1888,28 +1982,25 @@ fn main() -> Result<()> {
         })?;
     info!("State merger thread spawned.");
 
-    // --- Spawn Syslog Receiver Thread ---
+    // --- Spawn Syslog Receiver Task (Async) ---
     let syslog_receiver_shutdown = shutdown.clone();
-    let raw_log_tx_for_receiver = raw_log_tx.clone(); // CLONE THE SENDER HERE
-    let syslog_receiver_handle = thread::Builder::new()
-        .name("syslog_receiver".to_string())
-        .spawn(move || {
-            if let Err(e) =
-                syslog_receiver_thread(raw_log_tx_for_receiver, syslog_receiver_shutdown)
-            {
-                // Use the cloned sender
-                error!("Syslog receiver thread encountered a critical error: {}", e);
-            }
-            info!("Syslog receiver thread has exited.");
-        })?;
-    info!("Syslog receiver thread spawned.");
+    let raw_log_tx_for_receiver = raw_log_tx.clone();
+    let syslog_receiver_handle = tokio::spawn(async move {
+        if let Err(e) =
+            syslog_receiver_thread(raw_log_tx_for_receiver, syslog_receiver_shutdown).await
+        {
+            error!("Syslog receiver task encountered a critical error: {}", e);
+        }
+        info!("Syslog receiver task has exited.");
+    });
+    info!("Syslog receiver task spawned.");
 
-    // --- Spawn Enrichment Worker Threads ---
+    // --- Spawn Enrichment Worker Threads (Blocking CPU-bound tasks) ---
     let mut enrichment_handles = Vec::new();
     for i in 0..ENRICHMENT_WORKER_COUNT {
         let raw_log_rx_clone = raw_log_rx.clone();
         let elk_tx_clone = elk_tx.clone();
-        let intel_db_clone = threat_intel_db.clone(); // This clone is cheap (Arc clone)
+        let intel_db_clone = threat_intel_db.clone();
         let state_merger_tx_clone = state_merger_tx.clone();
         let shutdown_clone = shutdown.clone();
         let handle = thread::Builder::new()
@@ -1937,41 +2028,38 @@ fn main() -> Result<()> {
         ENRICHMENT_WORKER_COUNT
     );
 
-    // --- Spawn ELK Sender Thread ---
+    // --- Spawn ELK Sender Task (Async) ---
     let elk_sender_shutdown = shutdown.clone();
-    let elk_sender_handle = thread::Builder::new()
-        .name("elk_sender".to_string())
-        .spawn(move || {
-            if let Err(e) = elk_sender_thread(elk_rx, elk_sender_shutdown) {
-                error!("ELK sender thread encountered a critical error: {}", e);
-            }
-            info!("ELK sender thread has exited.");
-        })?;
-    info!("ELK sender thread spawned.");
+    let elk_sender_handle = tokio::spawn(async move {
+        if let Err(e) = elk_sender_thread(elk_rx, elk_sender_shutdown).await {
+            error!("ELK sender task encountered a critical error: {}", e);
+        }
+        info!("ELK sender task has exited.");
+    });
+    info!("ELK sender task spawned.");
 
-    // --- Main Thread Waits for Other Threads ---
-    info!("Main thread waiting for syslog_receiver thread to complete.");
-    syslog_receiver_handle.join().unwrap();
+    // --- Main Thread Waits for Other Tasks/Threads ---
+    info!("Main task waiting for syslog_receiver task to complete.");
+    syslog_receiver_handle.await.unwrap();
 
-    info!("Main thread waiting for all enrichment worker threads to complete.");
-    drop(raw_log_tx); // Close the original sender, which will eventually close the channel
-                      // when all cloned senders (moved into enrichment workers) are also dropped.
+    info!("Main task waiting for all enrichment worker threads to complete.");
+    drop(raw_log_tx); // Close the original sender to signal workers to drain
     for handle in enrichment_handles {
         handle.join().unwrap();
     }
 
-    info!("Main thread waiting for elk_sender thread to complete.");
+    info!("Main task waiting for elk_sender task to complete.");
     drop(elk_tx); // Close the sender side of the elk channel to signal sender to finish
-    elk_sender_handle.join().unwrap();
+    elk_sender_handle.await.unwrap();
 
-    info!("Main thread waiting for state_merger thread to complete.");
+    info!("Main task waiting for state_merger thread to complete.");
     drop(state_merger_tx); // Close the sender side of the state merger channel
     state_merger_handle.join().unwrap();
 
-    info!("All worker threads have finished. Service is performing final shutdown.");
-    send_telegram_message(
-        "✅ *Shutdown Complete:* Fortigate Log Forwarder service stopped gracefully.",
-    );
+    info!("All worker tasks/threads have finished. Service is performing final shutdown.");
+    tokio::spawn(send_telegram_message(
+        "✅ *Shutdown Complete:* Fortigate Log Forwarder service stopped gracefully.".to_string(),
+    ));
 
     Ok(())
 }
