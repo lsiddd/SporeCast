@@ -23,7 +23,7 @@ use crate::telegram::send_telegram_message;
 // --- Threat Intelligence Database Structure ---
 // This struct holds all loaded threat intelligence indicators.
 // ==============================================================================
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ThreatIntel {
     pub malicious_ips: Arc<HashMap<String, Vec<String>>>, // Stores malicious IPs and the list of feeds they appeared in.
     pub malicious_domains: Arc<HashSet<String>>,           // Stores unique malicious domains.

@@ -1,0 +1,69 @@
+# Forwarder Configuration File
+# This configuration file allows you to specify which forwarder to run and configure
+# connection details for ELK stack, Wazuh, and other services.
+
+[forwarder]
+# Specify which forwarder to run: "fortigate" or "palo_alto"
+type = "fortigate"
+
+[network]
+# Syslog port to listen on for incoming logs
+# Fortigate typically uses 514, Palo Alto uses 5514
+syslog_port = 514
+
+# Wazuh configuration
+wazuh_host = "127.0.0.1"
+wazuh_port = 1514
+
+# ELK Stack / Logstash configuration
+elk_host = "68.168.216.248"
+elk_port = 5140
+elk_index_name = "security-logs"  # Used for Palo Alto logs
+
+# Network timeout settings
+socket_timeout_secs = 10
+
+[logging]
+# Log file path for the forwarder application itself
+log_file = "/var/log/forwarder.log"
+state_file = "/var/lib/forwarder/state.json"
+
+[performance]
+# Queue sizes for different processing stages
+max_receiver_queue_size = 50000
+max_enrichment_queue_size = 40000
+max_wazuh_queue_size = 40000
+
+# Number of worker threads for processing
+enrichment_worker_count = 8
+
+# ELK batch settings
+elk_batch_size = 1000
+elk_batch_flush_interval_secs = 1
+
+[threat_intelligence]
+# Enable threat intelligence feed fetching and enrichment
+enable_threat_intel_feeds = true
+threat_intel_refresh_interval_secs = 86400  # 24 hours
+threat_intel_cache_dir = "/var/lib/forwarder/threat_intel_cache"
+
+[behavioral_analysis]
+# Enable behavioral analysis and anomaly detection
+enable_behavioral_analysis = true
+behavior_window_minutes = 5
+high_severity_threshold = 10
+
+[telegram]
+# Telegram notification configuration
+enable_telegram = false
+bot_token = "YOUR_TELEGRAM_BOT_TOKEN"
+chat_id = "YOUR_TELEGRAM_CHAT_ID"
+heartbeat_interval_secs = 3600  # 1 hour
+
+[fortigate]
+# Fortigate-specific configuration
+# This section is used when forwarder.type = "fortigate"
+
+[palo_alto]
+# Palo Alto-specific configuration
+# This section is used when forwarder.type = "palo_alto"

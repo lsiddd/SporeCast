@@ -3,3 +3,6 @@
 target
 esdata
 kibanadata
+.DS_Store
+test_logs
+.claude

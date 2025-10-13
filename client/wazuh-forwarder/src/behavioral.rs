@@ -237,4 +237,10 @@ impl StateManager {
         debug!("Successfully saved state.");
         Ok(())
     }
+
+    // Merges worker state into the main state manager
+    pub fn merge_worker_state(&mut self, worker_state: &AlertHistory) {
+        debug!("Merging worker state into main state manager");
+        self.state.alert_history.merge(worker_state.clone());
+    }
 }
