@@ -121,22 +121,23 @@ pub fn palo_alto_enrichment_worker_thread(
                             if parsed_log.get("forwarder_enrichment").is_some() {
                                 enriched_count += 1;
                                 debug!("[Worker {}] Log enriched with threat intelligence and behavioral analysis", worker_id);
+
+                                // Only forward to Wazuh if threat intel indicators were found
+                                match format_json_to_palo_alto_syslog(&parsed_log) {
+                                    Ok(formatted_syslog) => {
+                                        if let Err(e) = wazuh_enriched_tx.try_send(formatted_syslog) {
+                                            warn!("[Worker {}] Failed to send formatted log to Wazuh enriched queue: {}. Queue may be full.", worker_id, e);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!("[Worker {}] Failed to format JSON back to syslog for Wazuh: {}", worker_id, e);
+                                    }
+                                }
+                            } else {
+                                debug!("[Worker {}] Skipping Wazuh forwarding - no threat intel indicators found", worker_id);
                             }
                         } else {
                             debug!("[Worker {}] Skipping behavioral analysis due to high load", worker_id);
-                        }
-                        
-                        // MODIFIED: Reordered operations to avoid cloning `parsed_log`.
-                        // 1. Format for Wazuh using a reference to the log.
-                        match format_json_to_palo_alto_syslog(&parsed_log) {
-                            Ok(formatted_syslog) => {
-                                if let Err(e) = wazuh_enriched_tx.try_send(formatted_syslog) {
-                                    warn!("[Worker {}] Failed to send formatted log to Wazuh enriched queue: {}. Queue may be full.", worker_id, e);
-                                }
-                            }
-                            Err(e) => {
-                                warn!("[Worker {}] Failed to format JSON back to syslog for Wazuh: {}", worker_id, e);
-                            }
                         }
 
                         // 2. Send the original `parsed_log` to ELK, consuming it (no clone).
