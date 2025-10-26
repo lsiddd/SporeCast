@@ -17,7 +17,8 @@ use tokio::{
 };
 
 use crate::behavioral::{AlertHistory, StateManager};
-use crate::palo_alto_config::*;
+use crate::palo_alto_config::{ELK_HOST, ELK_PORT, PALO_ALTO_SYSLOG_PORT}; // Import Palo Alto-specific settings
+use crate::unified_config::*; // Import unified configuration
 use crate::palo_alto_parsing::{enrich_and_analyze_log, format_json_to_palo_alto_syslog, parse_palo_alto_log_to_json};
 use crate::telegram::send_telegram_message;
 use crate::threat_intel::ThreatIntel;
@@ -361,7 +362,7 @@ pub fn state_merger_thread(
                 debug!("Merging state update #{}", updates_processed);
 
                 let mut manager = state_manager.lock().unwrap();
-                manager.merge_worker_state(&worker_state);
+                manager._merge_worker_state(&worker_state);
 
                 if last_save.elapsed().as_secs() >= 10 {
                     if let Err(e) = manager.save() {

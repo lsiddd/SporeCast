@@ -1,7 +1,7 @@
 use log::{debug, error, warn};
 use reqwest::Client;
 
-use crate::config::*;
+use crate::unified_config::*;
 
 // ==============================================================================
 // --- Telegram Notifications ---

@@ -9,8 +9,11 @@ use std::{
 };
 
 use crate::behavioral::AlertHistory;
-use crate::config::*;
+use crate::unified_config::*;
 use crate::threat_intel::ThreatIntel;
+
+// Import Fortigate-specific regex for parsing
+use crate::config::FORTIGATE_KV_REGEX;
 
 // ==============================================================================
 // --- Threat Hunting & Enrichment ---

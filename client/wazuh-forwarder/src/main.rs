@@ -22,6 +22,7 @@ mod parsing;
 mod telegram;
 mod threat_intel;
 mod workers;
+mod unified_config;
 
 use behavioral::{StateManager};
 use config::*;

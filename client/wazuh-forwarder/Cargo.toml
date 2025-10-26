@@ -14,6 +14,7 @@ path = "src/palo_alto_main.rs"
 [dependencies]
 anyhow = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.0", features = ["derive"] } # Added for command line parsing
 crossbeam-channel = "0.5" # Keep for inter-thread communication, as it's very efficient
 csv = "1.2" # Added for Palo Alto CSV parsing
 env_logger = "0.10" # For simple test logging
