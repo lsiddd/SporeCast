@@ -10,6 +10,9 @@ pub mod workers;
 // Unified configuration for all forwarder binaries
 pub mod unified_config;
 
+// Performance optimizations (memory pools, circuit breakers, etc.)
+pub mod performance;
+
 // Palo Alto specific modules
 pub mod palo_alto_config;
 pub mod palo_alto_parsing;

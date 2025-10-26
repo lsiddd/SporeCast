@@ -15,12 +15,30 @@ pub const SOCKET_TIMEOUT_SECS: u64 = 10;
 pub const HEARTBEAT_INTERVAL_SECS: u64 = 3600;
 
 // --- Performance Configuration ---
-pub const MAX_RECEIVER_QUEUE_SIZE: usize = 50000;
-pub const MAX_ENRICHMENT_QUEUE_SIZE: usize = 40000;
-pub const MAX_WAZUH_QUEUE_SIZE: usize = 40000;
-pub const ENRICHMENT_WORKER_COUNT: usize = 8;
-pub const ELK_BATCH_SIZE: usize = 1000;
-pub const ELK_BATCH_FLUSH_INTERVAL_SECS: u64 = 1;
+pub const MAX_RECEIVER_QUEUE_SIZE: usize = 500000;  // Increased 10x for high throughput
+pub const MAX_ENRICHMENT_QUEUE_SIZE: usize = 400000; // Increased 10x for high throughput
+pub const MAX_WAZUH_QUEUE_SIZE: usize = 400000;      // Increased 10x for high throughput
+pub const ENRICHMENT_WORKER_COUNT: usize = 16;       // Doubled for better parallelism
+pub const ELK_BATCH_SIZE: usize = 5000;              // Increased batch size for efficiency
+pub const ELK_BATCH_FLUSH_INTERVAL_SECS: u64 = 2;    // Slightly increased flush interval
+
+// --- High Workload Management ---
+#[allow(dead_code)]
+pub const HIGH_WORKLOAD_THRESHOLD: f64 = 0.8;        // Trigger degradation at 80% queue capacity
+#[allow(dead_code)]
+pub const DISABLE_BEHAVIORAL_UNDER_HIGH_LOAD: bool = true; // Auto-disable behavioral analysis under load
+#[allow(dead_code)]
+pub const QUEUE_MONITORING_INTERVAL_SECS: u64 = 10;  // Monitor queue sizes every 10 seconds
+#[allow(dead_code)]
+pub const CONNECTION_POOL_SIZE: usize = 4;           // Number of ELK connections in pool
+
+// --- Circuit Breaker Configuration ---
+#[allow(dead_code)]
+pub const CIRCUIT_BREAKER_FAILURE_THRESHOLD: usize = 5;     // Failures before opening circuit
+#[allow(dead_code)]
+pub const CIRCUIT_BREAKER_TIMEOUT_SECS: u64 = 30;          // Time before trying to close circuit
+#[allow(dead_code)]
+pub const CIRCUIT_BREAKER_SUCCESS_THRESHOLD: usize = 3;     // Successes needed to close circuit
 
 // --- Telegram Configuration ---
 pub const ENABLE_TELEGRAM: bool = true;
