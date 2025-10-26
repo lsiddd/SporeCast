@@ -4,7 +4,7 @@
 
 [forwarder]
 # Specify which forwarder to run: "fortigate" or "palo_alto"
-type = "fortigate"
+type = "palo_alto"
 
 [network]
 # Syslog port to listen on for incoming logs
@@ -16,7 +16,7 @@ wazuh_host = "127.0.0.1"
 wazuh_port = 1514
 
 # ELK Stack / Logstash configuration
-elk_host = "68.168.216.248"
+elk_host = "127.0.0.1"
 elk_port = 5140
 elk_index_name = "security-logs"  # Used for Palo Alto logs
 

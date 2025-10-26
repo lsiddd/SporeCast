@@ -11,10 +11,6 @@ path = "src/main.rs"
 name = "palo_alto_forwarder"
 path = "src/palo_alto_main.rs"
 
-[[bin]]
-name = "config_test"
-path = "src/bin/config_test.rs"
-
 [dependencies]
 anyhow = "1.0"
 chrono = { version = "0.4", features = ["serde"] }

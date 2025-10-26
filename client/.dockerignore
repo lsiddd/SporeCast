@@ -1,0 +1,41 @@
+# Git
+.git
+.gitignore
+
+# Documentation
+*.md
+README*
+
+# Deployment scripts
+deploy*.sh
+*.service
+
+# Docker files
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Rust build artifacts
+wazuh-forwarder/target/debug/
+wazuh-forwarder/target/release/deps/
+wazuh-forwarder/target/release/build/
+wazuh-forwarder/target/.rustc_info.json
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+
+# Test files (keep test_logs for potential testing)
+# wazuh-forwarder/test_logs/

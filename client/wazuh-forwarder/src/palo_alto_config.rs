@@ -7,38 +7,44 @@ use std::collections::HashMap;
 // Configuration specific to Palo Alto PAN-OS log forwarding
 // ==============================================================================
 
-// Network Configuration
-pub const PALO_ALTO_SYSLOG_PORT: u16 = 5514; // Different port from Fortigate
-pub const WAZUH_LOCAL_SYSLOG_HOST: &str = "127.0.0.1"; 
+// --- Network Configuration ---
+
+// Port for receiving incoming Palo Alto syslog messages.
+pub const PALO_ALTO_SYSLOG_PORT: u16 = 514;
+
+// Destination for forwarding both raw and enriched logs to the Wazuh Manager.
+pub const WAZUH_LOCAL_SYSLOG_HOST: &str = "127.0.0.1";
 pub const WAZUH_LOCAL_SYSLOG_PORT: u16 = 1514;
 
-// ELK Configuration (same as Fortigate)
+// --- Logstash Configuration (for enriched logs) ---
+// The forwarder sends enriched JSON logs to this Logstash TCP input.
+// Logstash then handles secure forwarding to Elasticsearch.
 pub const ELK_HOST: &str = "127.0.0.1";
-pub const ELK_PORT: u16 = 9200;
-pub const ELK_INDEX_NAME: &str = "palo-alto-logs";
+pub const ELK_PORT: u16 = 5142; // MODIFIED: Changed from 9200 (Elasticsearch) to 5142 to target the Logstash service.
+// NOTE: The index name (e.g., "palo-alto-logs") is now controlled by your logstash.conf file.
 
-// Application Configuration
+// --- Application Configuration ---
 pub const LOG_FILE: &str = "/var/log/palo_alto_forwarder.log";
-pub const STATE_FILE: &str = "/tmp/palo_alto_forwarder_state.json";
+pub const STATE_FILE: &str = "/var/lib/palo-alto-forwarder/forwarder_state.json"; // Changed from /tmp for persistence
 
-// Thread and Queue Configuration
+// --- Performance Tuning ---
 pub const MAX_RECEIVER_QUEUE_SIZE: usize = 10000;
 pub const MAX_ENRICHMENT_QUEUE_SIZE: usize = 5000;
 pub const MAX_WAZUH_QUEUE_SIZE: usize = 5000;
 pub const ENRICHMENT_WORKER_COUNT: usize = 4;
 
-// Behavioral Analysis Configuration
+// --- Feature Toggles ---
 pub const ENABLE_BEHAVIORAL_ANALYSIS: bool = true;
 pub const ENABLE_THREAT_INTEL_FEEDS: bool = true;
 
-// Threat Intelligence Feed URLs (reuse from Fortigate config)
+// --- Threat Intelligence Configuration ---
 pub const THREAT_INTEL_FEEDS: &[&str] = &[
     "https://feodotracker.abuse.ch/downloads/ipblocklist.txt",
     "https://threatfox.abuse.ch/downloads/hostfile.txt",
 ];
 pub const THREAT_INTEL_UPDATE_INTERVAL_HOURS: u64 = 24;
 
-// Telegram Configuration for Alerts (same as Fortigate)
+// --- Telegram Notification Configuration ---
 pub const TELEGRAM_BOT_TOKEN: &str = "YOUR_BOT_TOKEN_HERE";
 pub const TELEGRAM_CHAT_ID: &str = "YOUR_CHAT_ID_HERE";
 
@@ -96,7 +102,7 @@ lazy_static! {
 // Suspicious processes for Palo Alto analysis
 pub const SUSPICIOUS_PROCESSES: &[&str] = &[
     "powershell",
-    "cmd.exe", 
+    "cmd.exe",
     "psexec",
     "wmic",
     "rundll32",
@@ -136,7 +142,7 @@ pub const HIGH_RISK_APP_CATEGORIES: &[&str] = &[
     "peer-to-peer",
     "file-sharing",
     "proxy",
-    "anonymizer", 
+    "anonymizer",
     "tunneling",
     "hacking-tools",
     "malware",

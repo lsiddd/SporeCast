@@ -50,7 +50,7 @@ async fn main() -> Result<()> {
                 message
             ))
         })
-        .level(LevelFilter::Debug) // Set default logging level to DEBUG for verbose output.
+        .level(LevelFilter::Info) // Set default logging level to DEBUG for verbose output.
         .chain(io::stdout()); // Always log to standard output.
 
     match log_file_result {
