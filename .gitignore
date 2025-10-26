@@ -6,3 +6,4 @@ kibanadata
 .DS_Store
 test_logs
 .claude
+palo_alto_logs.txt
