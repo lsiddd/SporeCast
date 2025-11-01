@@ -12,8 +12,6 @@ pub struct ForwarderConfig {
     pub behavioral_analysis: BehavioralConfig,
     pub telegram: TelegramConfig,
     #[serde(default)]
-    pub fortigate: FortigateConfig,
-    #[serde(default)]
     pub palo_alto: PaloAltoConfig,
 }
 
@@ -72,10 +70,6 @@ pub struct TelegramConfig {
     pub heartbeat_interval_secs: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
-pub struct FortigateConfig {
-    // Add Fortigate-specific settings here if needed
-}
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct PaloAltoConfig {
@@ -92,7 +86,7 @@ impl ForwarderConfig {
     pub fn validate(&self) -> Result<(), String> {
         // Validate forwarder type
         match self.forwarder.forwarder_type.as_str() {
-            "fortigate" | "palo_alto" => {},
+            "palo_alto" => {},
             _ => return Err(format!("Invalid forwarder type: {}", self.forwarder.forwarder_type)),
         }
 
@@ -127,9 +121,6 @@ impl ForwarderConfig {
         Ok(())
     }
 
-    pub fn is_fortigate(&self) -> bool {
-        self.forwarder.forwarder_type == "fortigate"
-    }
 
     pub fn is_palo_alto(&self) -> bool {
         self.forwarder.forwarder_type == "palo_alto"

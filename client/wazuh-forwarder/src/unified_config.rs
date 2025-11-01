@@ -5,7 +5,7 @@ use std::collections::HashMap;
 // --- Unified Configuration for All Binaries ---
 // This module provides standardized threat intelligence configuration,
 // detection patterns, and behavioral analysis rules for use across
-// all forwarder binaries (Fortigate, Palo Alto, etc.).
+// all forwarder binaries (Palo Alto, etc.).
 // ==============================================================================
 
 // --- Network Configuration Shared Defaults ---
@@ -174,10 +174,6 @@ lazy_static::lazy_static! {
         r"(?i)(?:https?|ftp)://[^\s/$.?#].[^\s]*|www\.[^\s/$.?#].[^\s]*"
     ).unwrap();
 
-    // Fortigate specific KV parsing
-    pub static ref FORTIGATE_KV_REGEX: Regex = Regex::new(
-        r#"(\w+)=((?:"((?:[^"\\]|\\.)*)"|([^"\s]+)))"#
-    ).unwrap();
 
     // Compiled correlation rules
     pub static ref CORRELATION_RULES_COMPILED: Vec<(&'static str, Regex)> = 

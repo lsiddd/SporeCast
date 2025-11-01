@@ -1,11 +1,8 @@
 // Library module definitions for shared code between forwarders
 
 pub mod behavioral;
-pub mod config;
-pub mod parsing;
 pub mod telegram;
 pub mod threat_intel;
-pub mod workers;
 
 // Unified configuration for all forwarder binaries
 pub mod unified_config;

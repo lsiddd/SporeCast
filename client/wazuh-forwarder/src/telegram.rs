@@ -29,7 +29,7 @@ pub async fn send_telegram_message(message: String) {
     let url = format!("https://api.telegram.org/bot{}/sendMessage", TELEGRAM_TOKEN);
     let params = [
         ("chat_id", TELEGRAM_CHAT_ID),
-        ("text", &format!("[Fortigate-Forwarder]\n{}", message)),
+        ("text", &format!("[Palo Alto-Forwarder]\n{}", message)),
         ("parse_mode", "Markdown"), // Allows basic formatting in Telegram messages.
     ];
     if let Err(e) = client.post(&url).form(&params).send().await {
