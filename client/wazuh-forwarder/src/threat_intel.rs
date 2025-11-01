@@ -16,7 +16,7 @@ use std::{
 };
 use tokio::task::JoinSet;
 
-use crate::config::*;
+use crate::unified_config::*;
 use crate::telegram::send_telegram_message;
 
 // ==============================================================================
@@ -243,7 +243,7 @@ pub async fn threat_intel_updater_thread(intel_db: Arc<Mutex<ThreatIntel>>, shut
                     info!("Successfully downloaded {} IPs from {}.", items.len(), url);
                     for ip in items {
                         if is_public_ip(&ip) {
-                            all_ips.entry(ip).or_default().push(url.to_string());
+                            all_ips.entry(ip.to_string()).or_default().push(url.to_string());
                         } else {
                             debug!("Skipping private/special IP from feed '{}': {}", url, ip);
                         }

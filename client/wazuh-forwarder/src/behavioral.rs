@@ -9,7 +9,7 @@ use std::{
     path::Path,
 };
 
-use crate::config::*;
+use crate::unified_config::*;
 
 // ==============================================================================
 // --- Behavioral Analysis Engine Structure ---
@@ -239,7 +239,7 @@ impl StateManager {
     }
 
     // Merges worker state into the main state manager
-    pub fn merge_worker_state(&mut self, worker_state: &AlertHistory) {
+    pub fn _merge_worker_state(&mut self, worker_state: &AlertHistory) {
         debug!("Merging worker state into main state manager");
         self.state.alert_history.merge(worker_state.clone());
     }

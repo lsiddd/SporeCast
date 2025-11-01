@@ -3,14 +3,14 @@ use chrono::Utc;
 use log::debug;
 use serde_json::Value;
 use std::collections::HashMap;
+use crate::performance::STRING_POOL;
 
 // ==============================================================================
 // --- Palo Alto Log Parser ---
 // Parses Palo Alto PAN-OS CSV format logs into structured JSON objects.
-// Based on PAN-OS Traffic Log format with comprehensive field mapping.
 // ==============================================================================
 
-// Field headers for Palo Alto Traffic logs - adjusted for actual CSV format
+// Field headers for Palo Alto Traffic logs
 const PALO_ALTO_HEADERS: &[&str] = &[
     "Log Number", "Receive Time", "Serial Number", "Type", "Threat/Content Type", "Config Version", "Generated Time",
     "Source address", "Destination address", "NAT source IP", "NAT destination IP", "Rule Name",
@@ -48,54 +48,48 @@ const INTEGER_FIELDS: &[&str] = &[
 ];
 
 // Fields that should be parsed as floats  
-const FLOAT_FIELDS: &[&str] = &[
-    "High-Resolution-Timestamp"
-];
+const FLOAT_FIELDS: &[&str] = &["High-Resolution-Timestamp"];
 
 pub fn parse_palo_alto_log_to_json(raw_log: &str) -> Result<Value> {
     debug!("Attempting to parse raw Palo Alto log: '{}'", raw_log);
     
+    let mut working_string = STRING_POOL.get_string();
+    
     // Extract the CSV part from the syslog message
-    // For Palo Alto, we need to skip the device name prefix and get to the actual CSV
-    // The format is: PA-5220-1 1,2025/08/07 09:08:47,... where the CSV starts after the space
     let csv_content = if let Some(device_start) = raw_log.find("PA-") {
-        // Find the space after the device name, then the CSV starts after that
         let device_section = &raw_log[device_start..];
         if let Some(space_pos) = device_section.find(' ') {
             &device_section[space_pos + 1..]
         } else {
             device_section
         }
-    } else {
-        // Fallback: try to find CSV starting with number,date pattern
-        if let Some(csv_start) = raw_log.find(",2025/") {
-            if csv_start > 0 {
-                // Go back to find the start of the number
-                let preceding = &raw_log[..csv_start];
-                if let Some(space_before_num) = preceding.rfind(' ') {
-                    &raw_log[space_before_num + 1..]
-                } else {
-                    &raw_log[csv_start..]
-                }
+    } else if let Some(csv_start) = raw_log.find(",2025/") {
+        if csv_start > 0 {
+            let preceding = &raw_log[..csv_start];
+            if let Some(space_before_num) = preceding.rfind(' ') {
+                &raw_log[space_before_num + 1..]
             } else {
                 &raw_log[csv_start..]
             }
-        } else if let Some(angle_bracket_end) = raw_log.find('>') {
-            &raw_log[angle_bracket_end + 1..]
         } else {
-            raw_log
+            &raw_log[csv_start..]
         }
+    } else if let Some(angle_bracket_end) = raw_log.find('>') {
+        &raw_log[angle_bracket_end + 1..]
+    } else {
+        raw_log
     };
+    
+    working_string.push_str(csv_content);
 
     debug!("Extracted CSV content: '{}'", csv_content);
 
-    // Parse CSV fields
+    // Parse CSV fields synchronously
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(false)
-        .from_reader(csv_content.as_bytes());
+        .from_reader(working_string.as_bytes());
 
-    let mut records = reader.records();
-    let record = match records.next() {
+    let record = match reader.records().next() {
         Some(Ok(record)) => record,
         Some(Err(e)) => return Err(anyhow!("CSV parsing error: {}", e)),
         None => return Err(anyhow!("No CSV records found in log")),
@@ -108,7 +102,6 @@ pub fn parse_palo_alto_log_to_json(raw_log: &str) -> Result<Value> {
         let field_name = if i < PALO_ALTO_HEADERS.len() {
             PALO_ALTO_HEADERS[i]
         } else {
-            // Handle extra fields beyond known headers
             debug!("Unknown field at position {}: {}", i, field);
             continue;
         };
@@ -121,31 +114,18 @@ pub fn parse_palo_alto_log_to_json(raw_log: &str) -> Result<Value> {
         // Parse based on field type
         let parsed_value = if INTEGER_FIELDS.contains(&field_name) {
             match field_value.parse::<i64>() {
-                Ok(num) => {
-                    debug!("Parsed '{}' as integer: {}", field_name, num);
-                    Value::Number(num.into())
-                }
-                Err(_) => {
-                    debug!("Failed to parse '{}' as integer, storing as string: '{}'", field_name, field_value);
-                    Value::String(field_value.to_string())
-                }
+                Ok(num) => Value::Number(num.into()),
+                Err(_) => Value::String(field_value.to_string()),
             }
         } else if FLOAT_FIELDS.contains(&field_name) {
             match field_value.parse::<f64>() {
-                Ok(num) => {
-                    debug!("Parsed '{}' as float: {}", field_name, num);
-                    Value::Number(serde_json::Number::from_f64(num).unwrap_or_else(|| 0.into()))
-                }
-                Err(_) => {
-                    debug!("Failed to parse '{}' as float, storing as string: '{}'", field_name, field_value);
-                    Value::String(field_value.to_string())
-                }
+                Ok(num) => Value::Number(serde_json::Number::from_f64(num).unwrap_or_else(|| 0.into())),
+                Err(_) => Value::String(field_value.to_string()),
             }
         } else {
             Value::String(field_value.to_string())
         };
 
-        // Use normalized field names (replace spaces and special chars with underscores)
         let normalized_name = field_name.replace(" ", "_")
             .replace("/", "_")
             .replace("-", "_")
@@ -160,6 +140,9 @@ pub fn parse_palo_alto_log_to_json(raw_log: &str) -> Result<Value> {
     json_map.insert("log_source".to_string(), Value::String("palo_alto".to_string()));
 
     debug!("Finished parsing Palo Alto log. Resulting JSON keys: {:?}", json_map.keys().collect::<Vec<_>>());
+    
+    STRING_POOL.return_string(working_string);
+    
     Ok(Value::Object(json_map.into_iter().collect()))
 }
 
@@ -168,11 +151,8 @@ pub fn parse_palo_alto_log_to_json(raw_log: &str) -> Result<Value> {
 // Converts JSON log back to Palo Alto-compatible syslog format for Wazuh
 // ==============================================================================
 pub fn format_json_to_palo_alto_syslog(log_json: &Value) -> Result<String> {
-    // For Palo Alto, we'll create a key=value syslog format similar to Fortigate
-    // but with Palo Alto specific field prioritization
     let mut parts = Vec::new();
 
-    // Helper function to format values for syslog
     fn format_syslog_value(value: &Value) -> String {
         match value {
             Value::String(s) => {
@@ -195,9 +175,7 @@ pub fn format_json_to_palo_alto_syslog(log_json: &Value) -> Result<String> {
         }
     }
 
-    // Prioritize key Palo Alto fields
     if let Some(obj) = log_json.as_object() {
-        // Start with device and time information
         if let Some(device) = obj.get("device_name") {
             parts.push(format!("device_name={}", format_syslog_value(device)));
         }
@@ -207,8 +185,6 @@ pub fn format_json_to_palo_alto_syslog(log_json: &Value) -> Result<String> {
         if let Some(generated_time) = obj.get("generated_time") {
             parts.push(format!("generated_time={}", format_syslog_value(generated_time)));
         }
-
-        // Add core traffic information
         if let Some(src_addr) = obj.get("source_address") {
             parts.push(format!("src_ip={}", format_syslog_value(src_addr)));
         }
@@ -228,13 +204,11 @@ pub fn format_json_to_palo_alto_syslog(log_json: &Value) -> Result<String> {
             parts.push(format!("application={}", format_syslog_value(app)));
         }
 
-        // Add other fields, skipping internal ones
         for (key, value) in obj {
             if key.starts_with("@") || 
                key == "palo_alto_raw_log" || 
                key == "log_source" ||
                key == "forwarder_enrichment" ||
-               // Skip already processed fields
                key == "device_name" || key == "serial_number" || key == "generated_time" ||
                key == "source_address" || key == "destination_address" ||
                key == "source_port" || key == "destination_port" ||
@@ -248,7 +222,6 @@ pub fn format_json_to_palo_alto_syslog(log_json: &Value) -> Result<String> {
             }
         }
 
-        // Handle enrichment data similar to Fortigate implementation
         if let Some(enrichment) = obj.get("forwarder_enrichment") {
             if let Some(enrich_obj) = enrichment.as_object() {
                 for (enrich_key, enrich_value) in enrich_obj {
@@ -263,10 +236,8 @@ pub fn format_json_to_palo_alto_syslog(log_json: &Value) -> Result<String> {
         return Err(anyhow!("Log JSON is not an object, cannot format to Palo Alto syslog."));
     }
 
-    // Join with spaces and add syslog header
     let body = parts.join(" ");
     
-    // Use facility 16 (local0) and severity 6 (info) = 134 for Palo Alto logs
     let priority = 134;
     
     Ok(format!("<{}>PaloAlto: {}", priority, body))

@@ -15,7 +15,8 @@ use tokio::{
 };
 
 use crate::behavioral::{AlertHistory, StateManager};
-use crate::config::*;
+use crate::unified_config::*;
+use crate::config::{ELK_HOST, ELK_PORT, FORTIGATE_SYSLOG_PORT}; // Import Fortigate-specific settings
 use crate::parsing::{enrich_and_analyze_log, format_json_to_fortigate_syslog, parse_fortigate_log_to_json};
 use crate::telegram::send_telegram_message;
 use crate::threat_intel::ThreatIntel;

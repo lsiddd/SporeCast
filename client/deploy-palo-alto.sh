@@ -64,7 +64,6 @@ echo "--- Creating Palo Alto Forwarder Service File ---"
 cat > "${PROJECT_ROOT}/${SOURCE_SERVICE_FILE_NAME}" << EOF
 [Unit]
 Description=Palo Alto Log Forwarder
-Documentation=https://github.com/your-org/palo-alto-forwarder
 After=network.target
 Wants=network.target
 
