@@ -7,9 +7,6 @@ edition = "2021"
 name = "fortigate_forwarder"
 path = "src/main.rs"
 
-[[bin]]
-name = "palo_alto_forwarder"
-path = "src/palo_alto_main.rs"
 
 [dependencies]
 anyhow = "1.0"
