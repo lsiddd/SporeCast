@@ -40,11 +40,6 @@ pub const CIRCUIT_BREAKER_TIMEOUT_SECS: u64 = 30;          // Time before trying
 #[allow(dead_code)]
 pub const CIRCUIT_BREAKER_SUCCESS_THRESHOLD: usize = 3;     // Successes needed to close circuit
 
-// --- Telegram Configuration ---
-pub const ENABLE_TELEGRAM: bool = true;
-pub const TELEGRAM_TOKEN: &str = "YOUR_TELEGRAM_BOT_TOKEN";
-pub const TELEGRAM_CHAT_ID: &str = "YOUR_TELEGRAM_CHAT_ID";
-
 // --- Unified Threat Intelligence Configuration ---
 pub const ENABLE_THREAT_INTEL_FEEDS: bool = true;
 pub const THREAT_INTEL_REFRESH_INTERVAL_SECS: u64 = 86400; // 24 hours

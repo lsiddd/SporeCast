@@ -17,7 +17,6 @@ use std::{
 use tokio::task::JoinSet;
 
 use crate::unified_config::*;
-use crate::telegram::send_telegram_message;
 
 // ==============================================================================
 // --- Threat Intelligence Database Structure ---
@@ -219,7 +218,6 @@ pub async fn threat_intel_updater_thread(intel_db: Arc<Mutex<ThreatIntel>>, shut
         }
 
         info!("Initiating threat intelligence database update cycle.");
-        tokio::spawn(send_telegram_message("⏳ Starting threat intelligence database update...".to_string()));
 
         let mut new_intel = ThreatIntel::new(); // Create a new intel object to build up.
         let mut join_set = JoinSet::new();
@@ -324,11 +322,7 @@ pub async fn threat_intel_updater_thread(intel_db: Arc<Mutex<ThreatIntel>>, shut
             "Threat intelligence databases updated. Total indicators: {}",
             total_indicators
         );
-        tokio::spawn(send_telegram_message(format!(
-            // Cloned String here
-            "✅ Threat intelligence databases updated. Total indicators loaded: {}.",
-            total_indicators
-        )));
+        info!("Threat intelligence databases updated. Total indicators loaded: {}.", total_indicators);
 
         // Sleep until next refresh, but check shutdown flag every second.
         debug!(

@@ -20,7 +20,6 @@ use crate::behavioral::{AlertHistory, StateManager};
 use crate::palo_alto_config::{ELK_HOST, ELK_PORT, PALO_ALTO_SYSLOG_PORT};
 use crate::unified_config::*;
 use crate::palo_alto_parsing::{enrich_and_analyze_log, format_json_to_palo_alto_syslog, parse_palo_alto_log_to_json};
-use crate::telegram::send_telegram_message;
 use crate::threat_intel::ThreatIntel;
 use crate::performance::{STRING_POOL, QUEUE_MONITOR, get_circuit_breaker, ConnectionPool};
 
@@ -44,9 +43,7 @@ pub async fn palo_alto_syslog_receiver_thread(
 
     info!("Palo Alto syslog receiver successfully bound to {}", bind_addr);
 
-    tokio::spawn(send_telegram_message(
-        format!("🚀 *Palo Alto Log Forwarder Started:* Listening for logs on UDP port {}.", PALO_ALTO_SYSLOG_PORT)
-    ));
+    info!("Palo Alto Log Forwarder Started: Listening for logs on UDP port {}.", PALO_ALTO_SYSLOG_PORT);
 
     let mut buffer = [0; 8192];
     let mut log_count = 0u64;

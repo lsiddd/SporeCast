@@ -1,7 +1,6 @@
 // Library module definitions for shared code between forwarders
 
 pub mod behavioral;
-pub mod telegram;
 pub mod threat_intel;
 
 // Unified configuration for all forwarder binaries

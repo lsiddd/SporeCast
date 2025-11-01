@@ -10,7 +10,6 @@ pub struct ForwarderConfig {
     pub performance: PerformanceConfig,
     pub threat_intelligence: ThreatIntelConfig,
     pub behavioral_analysis: BehavioralConfig,
-    pub telegram: TelegramConfig,
     #[serde(default)]
     pub palo_alto: PaloAltoConfig,
 }
@@ -62,14 +61,6 @@ pub struct BehavioralConfig {
     pub high_severity_threshold: u32,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct TelegramConfig {
-    pub enable_telegram: bool,
-    pub bot_token: String,
-    pub chat_id: String,
-    pub heartbeat_interval_secs: u64,
-}
-
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct PaloAltoConfig {
@@ -108,15 +99,6 @@ impl ForwarderConfig {
             return Err("Worker count cannot be 0".to_string());
         }
 
-        // Validate Telegram configuration if enabled
-        if self.telegram.enable_telegram {
-            if self.telegram.bot_token.is_empty() || self.telegram.bot_token == "YOUR_TELEGRAM_BOT_TOKEN" {
-                return Err("Telegram bot token must be configured".to_string());
-            }
-            if self.telegram.chat_id.is_empty() || self.telegram.chat_id == "YOUR_TELEGRAM_CHAT_ID" {
-                return Err("Telegram chat ID must be configured".to_string());
-            }
-        }
 
         Ok(())
     }
