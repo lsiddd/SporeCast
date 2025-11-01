@@ -29,7 +29,7 @@ use crate::performance::{STRING_POOL, QUEUE_MONITOR, get_circuit_breaker, Connec
 // ==============================================================================
 pub async fn palo_alto_syslog_receiver_thread(
     raw_log_tx: Sender<String>,
-    wazuh_raw_tx: Sender<String>,
+    _wazuh_raw_tx: Sender<String>,
     shutdown: Arc<AtomicBool>,
 ) -> Result<()> {
     let bind_addr = format!("0.0.0.0:{}", PALO_ALTO_SYSLOG_PORT);
@@ -81,9 +81,14 @@ pub async fn palo_alto_syslog_receiver_thread(
                     }
                 }
 
+                // --- MODIFICATION START: Raw log forwarding disabled ---
+                // The following block is commented out to prevent sending raw, unenriched logs to Wazuh.
+                /*
                 if let Err(e) = wazuh_raw_tx.try_send(log_string.clone()) {
                     warn!("Failed to send raw log to Wazuh queue: {}. Queue may be full.", e);
                 }
+                */
+                // --- MODIFICATION END ---
                 
                 STRING_POOL.return_string(log_string);
             }

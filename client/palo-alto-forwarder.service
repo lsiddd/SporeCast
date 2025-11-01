@@ -1,0 +1,29 @@
+[Unit]
+Description=Palo Alto Log Forwarder
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/local/bin/palo_alto_forwarder --config /etc/forwarder/forwarder-config.toml
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=palo-alto-forwarder
+
+# Security settings
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/log /var/lib/palo-alto-forwarder /tmp
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=32768
+
+[Install]
+WantedBy=multi-user.target
