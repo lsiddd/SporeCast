@@ -20,7 +20,6 @@ use wazuh_forwarder::{
     behavioral::StateManager,
     palo_alto_config::*,
     palo_alto_workers::*,
-    telegram::send_telegram_message,
     threat_intel::{threat_intel_updater_thread, ThreatIntel},
 };
 
@@ -200,9 +199,6 @@ async fn main() -> Result<()> {
     state_merger_handle.join().unwrap();
 
     info!("All worker tasks/threads have finished. Service is performing final shutdown.");
-    tokio::spawn(send_telegram_message(
-        "✅ *Shutdown Complete:* Palo Alto Log Forwarder service stopped gracefully.".to_string(),
-    ));
 
     Ok(())
 }

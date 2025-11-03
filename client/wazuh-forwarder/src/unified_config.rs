@@ -5,7 +5,7 @@ use std::collections::HashMap;
 // --- Unified Configuration for All Binaries ---
 // This module provides standardized threat intelligence configuration,
 // detection patterns, and behavioral analysis rules for use across
-// all forwarder binaries (Fortigate, Palo Alto, etc.).
+// all forwarder binaries (Palo Alto, etc.).
 // ==============================================================================
 
 // --- Network Configuration Shared Defaults ---
@@ -39,11 +39,6 @@ pub const CIRCUIT_BREAKER_FAILURE_THRESHOLD: usize = 5;     // Failures before o
 pub const CIRCUIT_BREAKER_TIMEOUT_SECS: u64 = 30;          // Time before trying to close circuit
 #[allow(dead_code)]
 pub const CIRCUIT_BREAKER_SUCCESS_THRESHOLD: usize = 3;     // Successes needed to close circuit
-
-// --- Telegram Configuration ---
-pub const ENABLE_TELEGRAM: bool = true;
-pub const TELEGRAM_TOKEN: &str = "YOUR_TELEGRAM_BOT_TOKEN";
-pub const TELEGRAM_CHAT_ID: &str = "YOUR_TELEGRAM_CHAT_ID";
 
 // --- Unified Threat Intelligence Configuration ---
 pub const ENABLE_THREAT_INTEL_FEEDS: bool = true;
@@ -174,10 +169,6 @@ lazy_static::lazy_static! {
         r"(?i)(?:https?|ftp)://[^\s/$.?#].[^\s]*|www\.[^\s/$.?#].[^\s]*"
     ).unwrap();
 
-    // Fortigate specific KV parsing
-    pub static ref FORTIGATE_KV_REGEX: Regex = Regex::new(
-        r#"(\w+)=((?:"((?:[^"\\]|\\.)*)"|([^"\s]+)))"#
-    ).unwrap();
 
     // Compiled correlation rules
     pub static ref CORRELATION_RULES_COMPILED: Vec<(&'static str, Regex)> = 

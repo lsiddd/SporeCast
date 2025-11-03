@@ -19,7 +19,7 @@ use crate::unified_config::*;
 pub struct AlertHistory {
     pub src_ips: HashMap<String, u32>, // Counts of source IPs within the behavior window.
     pub users: HashMap<String, u32>,   // Counts of users within the behavior window.
-    pub rules: HashMap<u32, u32>,      // Counts of Fortigate `logid`s within the behavior window.
+    pub rules: HashMap<u32, u32>,      // Counts of log rule IDs within the behavior window.
     pub last_alert_time: DateTime<Utc>, // Timestamp of the last processed log. Used to reset the window.
 }
 
@@ -64,7 +64,7 @@ impl AlertHistory {
                 src_ip, self.src_ips[src_ip]
             );
         }
-        // Increment count for user. Fortigate logs might not consistently have a 'user' field in all log types.
+        // Increment count for user. Logs might not consistently have a 'user' field in all log types.
         if let Some(user) = log_data.get("user").and_then(Value::as_str) {
             *self.users.entry(user.to_string()).or_insert(0) += 1;
             debug!(
@@ -72,7 +72,7 @@ impl AlertHistory {
                 user, self.users[user]
             );
         }
-        // Increment count for Fortigate 'logid'. This acts as a unique identifier for log types.
+        // Increment count for log rule ID. This acts as a unique identifier for log types.
         if let Some(logid) = log_data.get("logid").and_then(Value::as_u64) {
             *self.rules.entry(logid as u32).or_insert(0) += 1;
             debug!(
@@ -120,7 +120,7 @@ impl AlertHistory {
                 }
             }
         }
-        // Check for specific Fortigate log ID flooding.
+        // Check for specific log ID flooding.
         if let Some(logid) = log_data.get("logid").and_then(Value::as_u64) {
             if let Some(&count) = self.rules.get(&(logid as u32)) {
                 if count > HIGH_SEVERITY_THRESHOLD {
