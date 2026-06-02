@@ -22,6 +22,8 @@ use crate::palo_alto_parsing::{enrich_and_analyze_log, format_json_to_palo_alto_
 use crate::threat_intel::ThreatIntel;
 use crate::performance::{QUEUE_MONITOR, get_circuit_breaker, ConnectionPool};
 
+const ELK_BATCH_ITEM_CAPACITY_ESTIMATE: usize = 512;
+
 // ==============================================================================
 // --- Palo Alto Syslog Receiver Thread ---
 // ==============================================================================
@@ -441,7 +443,7 @@ pub fn state_merger_thread(
 pub async fn test_initial_connection(elk_host: &str, elk_port: u16) -> Result<()> {
     info!("Testing initial connection to Logstash TCP input at {}:{}", elk_host, elk_port);
 
-    let connection_pool = ConnectionPool::new(elk_host.to_string(), elk_port, 1);
+    let connection_pool = ConnectionPool::new(elk_host, elk_port, 1);
 
     match connection_pool.get_connection().await {
         Ok(_) => {
@@ -469,7 +471,8 @@ async fn flush_batch_to_elk(
     let mut stream = pool.get_connection().await
         .context("Failed to get connection from pool")?;
     
-    let mut payload = String::with_capacity(batch.len().saturating_mul(512));
+    let mut payload =
+        String::with_capacity(batch.len().saturating_mul(ELK_BATCH_ITEM_CAPACITY_ESTIMATE));
     for log_json in batch {
         match serde_json::to_string(log_json) {
             Ok(json_str) => {

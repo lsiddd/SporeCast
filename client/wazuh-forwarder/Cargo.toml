@@ -14,7 +14,6 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.0", features = ["derive"] } # Added for command line parsing
 crossbeam-channel = "0.5" # Keep for inter-thread communication, as it's very efficient
 csv = "1.2" # Added for Palo Alto CSV parsing
-env_logger = "0.10" # For simple test logging
 fern = { version = "0.7", features = ["colored"] }
 lazy_static = "1.4"
 log = "0.4"
@@ -26,7 +25,6 @@ signal-hook = "0.3"
 sha2 = "0.10"
 thiserror = "2.0"
 tokio = { version = "1", features = ["full"] } # Added for async operations
-futures = "0.3" # Added for stream and other async utilities
 toml = "0.8" # Added for configuration file parsing
 parking_lot = "0.12" # High-performance mutex for memory pool
 dashmap = "5.5" # Concurrent hashmap for circuit breakers

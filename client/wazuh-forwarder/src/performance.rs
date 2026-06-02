@@ -14,6 +14,10 @@ use tokio::time::timeout;
 
 use crate::unified_config::*;
 
+const STRING_POOL_MAX_SIZE: usize = 10_000;
+const INITIAL_STRING_CAPACITY: usize = 2_048;
+const MAX_REUSABLE_STRING_CAPACITY: usize = 4_096;
+
 // ==============================================================================
 // --- Memory Pool for String Reuse ---
 // Reduces allocation overhead for high-throughput log processing
@@ -40,19 +44,19 @@ impl StringPool {
         let mut pool = self.pool.lock();
         if let Some(mut s) = pool.pop_front() {
             s.clear();
-            self.reused.fetch_add(1, Ordering::Relaxed);
+            increment_saturating(&self.reused, Ordering::Relaxed);
             debug!("Reused string from pool, reuse count: {}", self.reused.load(Ordering::Relaxed));
             s
         } else {
-            self.allocated.fetch_add(1, Ordering::Relaxed);
+            increment_saturating(&self.allocated, Ordering::Relaxed);
             debug!("Allocated new string, allocation count: {}", self.allocated.load(Ordering::Relaxed));
-            String::with_capacity(2048) // Pre-allocate reasonable capacity for log messages
+            String::with_capacity(INITIAL_STRING_CAPACITY)
         }
     }
 
     pub fn return_string(&self, mut s: String) {
         let mut pool = self.pool.lock();
-        if pool.len() < self.max_size && s.capacity() <= 4096 {
+        if pool.len() < self.max_size && s.capacity() <= MAX_REUSABLE_STRING_CAPACITY {
             s.clear();
             pool.push_back(s);
             debug!("Returned string to pool, pool size: {}", pool.len());
@@ -66,7 +70,7 @@ impl StringPool {
 }
 
 // Global string pool instance
-pub static STRING_POOL: Lazy<StringPool> = Lazy::new(|| StringPool::new(10000));
+pub static STRING_POOL: Lazy<StringPool> = Lazy::new(|| StringPool::new(STRING_POOL_MAX_SIZE));
 
 // ==============================================================================
 // --- Circuit Breaker Pattern ---
@@ -89,13 +93,13 @@ pub struct CircuitBreaker {
 }
 
 impl CircuitBreaker {
-    pub fn new(name: String) -> Self {
+    pub fn new(name: impl Into<String>) -> Self {
         Self {
             state: AtomicUsize::new(0), // Start closed
             failure_count: AtomicUsize::new(0),
             success_count: AtomicUsize::new(0),
             last_failure_time: Mutex::new(None),
-            name,
+            name: name.into(),
         }
     }
 
@@ -133,7 +137,7 @@ impl CircuitBreaker {
 
     pub fn record_success(&self) {
         let current_state = self.state();
-        self.success_count.fetch_add(1, Ordering::Release);
+        increment_saturating(&self.success_count, Ordering::AcqRel);
         self.failure_count.store(0, Ordering::Release);
 
         if current_state == CircuitState::HalfOpen
@@ -145,7 +149,7 @@ impl CircuitBreaker {
     }
 
     pub fn record_failure(&self) {
-        let failures = self.failure_count.fetch_add(1, Ordering::Release) + 1;
+        let failures = increment_saturating(&self.failure_count, Ordering::AcqRel);
         self.success_count.store(0, Ordering::Release);
         
         {
@@ -186,7 +190,7 @@ pub static CIRCUIT_BREAKERS: Lazy<DashMap<String, Arc<CircuitBreaker>>> = Lazy::
 pub fn get_circuit_breaker(name: &str) -> Arc<CircuitBreaker> {
     CIRCUIT_BREAKERS
         .entry(name.to_string())
-        .or_insert_with(|| Arc::new(CircuitBreaker::new(name.to_string())))
+        .or_insert_with(|| Arc::new(CircuitBreaker::new(name)))
         .clone()
 }
 
@@ -272,10 +276,10 @@ pub struct ConnectionPool {
 }
 
 impl ConnectionPool {
-    pub fn new(host: String, port: u16, max_size: usize) -> Self {
+    pub fn new(host: impl Into<String>, port: u16, max_size: usize) -> Self {
         Self {
             connections: Mutex::new(VecDeque::with_capacity(max_size)),
-            host,
+            host: host.into(),
             port,
             max_size,
             active_count: AtomicUsize::new(0),
@@ -320,5 +324,11 @@ impl ConnectionPool {
     pub fn stats(&self) -> (usize, usize) {
         let pool = self.connections.lock();
         (pool.len(), self.active_count.load(Ordering::Relaxed))
+    }
+}
+
+fn increment_saturating(counter: &AtomicUsize, ordering: Ordering) -> usize {
+    match counter.fetch_update(ordering, Ordering::Acquire, |value| Some(value.saturating_add(1))) {
+        Ok(previous) | Err(previous) => previous.saturating_add(1),
     }
 }

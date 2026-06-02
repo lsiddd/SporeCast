@@ -95,6 +95,12 @@ pub enum ConfigError {
     Validation(String),
 }
 
+impl ConfigError {
+    fn validation(message: impl Into<String>) -> Self {
+        Self::Validation(message.into())
+    }
+}
+
 impl Default for ForwarderConfig {
     fn default() -> Self {
         Self {
@@ -156,7 +162,7 @@ impl ForwarderConfig {
         match self.forwarder.forwarder_type.as_str() {
             "palo_alto" => {},
             _ => {
-                return Err(ConfigError::Validation(format!(
+                return Err(ConfigError::validation(format!(
                     "invalid forwarder type: {}",
                     self.forwarder.forwarder_type
                 )))
@@ -165,48 +171,40 @@ impl ForwarderConfig {
 
         // Validate network configuration
         if self.network.syslog_port == 0 {
-            return Err(ConfigError::Validation("syslog port cannot be 0".to_string()));
+            return Err(ConfigError::validation("syslog port cannot be 0"));
         }
 
         if self.network.elk_port == 0 {
-            return Err(ConfigError::Validation("ELK port cannot be 0".to_string()));
+            return Err(ConfigError::validation("ELK port cannot be 0"));
         }
 
         if self.network.wazuh_port == 0 {
-            return Err(ConfigError::Validation("Wazuh port cannot be 0".to_string()));
+            return Err(ConfigError::validation("Wazuh port cannot be 0"));
         }
 
         // Validate performance settings
         if self.performance.enrichment_worker_count == 0 {
-            return Err(ConfigError::Validation("worker count cannot be 0".to_string()));
+            return Err(ConfigError::validation("worker count cannot be 0"));
         }
 
         if self.performance.max_receiver_queue_size == 0 {
-            return Err(ConfigError::Validation(
-                "receiver queue size cannot be 0".to_string(),
-            ));
+            return Err(ConfigError::validation("receiver queue size cannot be 0"));
         }
 
         if self.performance.max_enrichment_queue_size == 0 {
-            return Err(ConfigError::Validation(
-                "enrichment queue size cannot be 0".to_string(),
-            ));
+            return Err(ConfigError::validation("enrichment queue size cannot be 0"));
         }
 
         if self.performance.max_wazuh_queue_size == 0 {
-            return Err(ConfigError::Validation(
-                "Wazuh queue size cannot be 0".to_string(),
-            ));
+            return Err(ConfigError::validation("Wazuh queue size cannot be 0"));
         }
 
         if self.performance.elk_batch_size == 0 {
-            return Err(ConfigError::Validation("ELK batch size cannot be 0".to_string()));
+            return Err(ConfigError::validation("ELK batch size cannot be 0"));
         }
 
         if self.performance.elk_batch_flush_interval_secs == 0 {
-            return Err(ConfigError::Validation(
-                "ELK batch flush interval cannot be 0".to_string(),
-            ));
+            return Err(ConfigError::validation("ELK batch flush interval cannot be 0"));
         }
 
         Ok(())

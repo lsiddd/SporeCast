@@ -2,7 +2,6 @@ use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use log::{debug, error, info, warn};
 use reqwest::Client;
-use serde_json;
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -22,13 +21,19 @@ use crate::unified_config::*;
 // --- Threat Intelligence Database Structure ---
 // This struct holds all loaded threat intelligence indicators.
 // ==============================================================================
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct ThreatIntel {
     pub malicious_ips: Arc<HashMap<String, Vec<String>>>, // Stores malicious IPs and the list of feeds they appeared in.
     pub malicious_domains: Arc<HashSet<String>>,           // Stores unique malicious domains.
     pub malicious_hashes: Arc<HashSet<String>>,            // Stores unique malicious file hashes.
     pub malicious_urls: Arc<HashSet<String>>,              // Stores unique malicious URLs.
     pub last_updated: DateTime<Utc>,                       // Timestamp of the last successful update.
+}
+
+impl Default for ThreatIntel {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ThreatIntel {
@@ -224,14 +229,11 @@ pub async fn threat_intel_updater_thread(intel_db: Arc<Mutex<ThreatIntel>>, shut
 
         // --- Fetch Malicious IPs ---
         info!("Fetching malicious IP feeds...");
-        let ip_futures: Vec<_> = IP_FEED_URLS.iter().map(|url| {
+        for url in IP_FEED_URLS.iter() {
             let url_str = url.to_string();
-            async move {
+            join_set.spawn(async move {
                 (url_str.clone(), download_feed(&url_str).await)
-            }
-        }).collect();
-        for fut in ip_futures {
-            join_set.spawn(fut);
+            });
         }
 
         let mut all_ips: HashMap<String, Vec<String>> = HashMap::new();
@@ -241,7 +243,7 @@ pub async fn threat_intel_updater_thread(intel_db: Arc<Mutex<ThreatIntel>>, shut
                     info!("Successfully downloaded {} IPs from {}.", items.len(), url);
                     for ip in items {
                         if is_public_ip(&ip) {
-                            all_ips.entry(ip.to_string()).or_default().push(url.to_string());
+                            all_ips.entry(ip).or_default().push(url.clone());
                         } else {
                             debug!("Skipping private/special IP from feed '{}': {}", url, ip);
                         }

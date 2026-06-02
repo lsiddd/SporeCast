@@ -52,6 +52,7 @@ const INTEGER_FIELDS: &[&str] = &[
 
 // Fields that should be parsed as floats  
 const FLOAT_FIELDS: &[&str] = &["High-Resolution-Timestamp"];
+const PALO_ALTO_SYSLOG_PRIORITY: u16 = 134;
 
 pub fn parse_palo_alto_log_to_json(raw_log: &str) -> Result<Value> {
     debug!("Attempting to parse raw Palo Alto log: '{}'", raw_log);
@@ -66,7 +67,8 @@ pub fn parse_palo_alto_log_to_json(raw_log: &str) -> Result<Value> {
         } else {
             device_section
         }
-    } else if let Some(csv_start) = raw_log.find(",2025/") {
+    } else if let Some(m) = CSV_TIMESTAMP_PATTERN.find(raw_log) {
+        let csv_start = m.start();
         if csv_start > 0 {
             let preceding = &raw_log[..csv_start];
             if let Some(space_before_num) = preceding.rfind(' ') {
@@ -102,9 +104,7 @@ pub fn parse_palo_alto_log_to_json(raw_log: &str) -> Result<Value> {
     
     // Map CSV fields to JSON using headers
     for (i, field) in record.iter().enumerate() {
-        let field_name = if i < PALO_ALTO_HEADERS.len() {
-            PALO_ALTO_HEADERS[i]
-        } else {
+        let Some(field_name) = PALO_ALTO_HEADERS.get(i) else {
             debug!("Unknown field at position {}: {}", i, field);
             continue;
         };
@@ -115,12 +115,12 @@ pub fn parse_palo_alto_log_to_json(raw_log: &str) -> Result<Value> {
         }
 
         // Parse based on field type
-        let parsed_value = if INTEGER_FIELDS.contains(&field_name) {
+        let parsed_value = if INTEGER_FIELDS.contains(field_name) {
             match field_value.parse::<i64>() {
                 Ok(num) => Value::Number(num.into()),
                 Err(_) => Value::String(field_value.to_string()),
             }
-        } else if FLOAT_FIELDS.contains(&field_name) {
+        } else if FLOAT_FIELDS.contains(field_name) {
             match field_value.parse::<f64>() {
                 Ok(num) => Value::Number(serde_json::Number::from_f64(num).unwrap_or_else(|| 0.into())),
                 Err(_) => Value::String(field_value.to_string()),
@@ -161,7 +161,7 @@ pub fn format_json_to_palo_alto_syslog(log_json: &Value) -> Result<String> {
         match value {
             Value::String(s) => {
                 if s.contains(' ') || s.contains('"') {
-                    format!("\"{}\"", s.replace("\"", "\\\""))
+                    format!("\"{}\"", s.replace('"', "\\\""))
                 } else {
                     s.clone()
                 }
@@ -242,9 +242,7 @@ pub fn format_json_to_palo_alto_syslog(log_json: &Value) -> Result<String> {
 
     let body = parts.join(" ");
     
-    let priority = 134;
-    
-    Ok(format!("<{}>PaloAlto: {}", priority, body))
+    Ok(format!("<{}>PaloAlto: {}", PALO_ALTO_SYSLOG_PRIORITY, body))
 }
 
 // ==============================================================================
