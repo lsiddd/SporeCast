@@ -1,0 +1,181 @@
+    Updating crates.io index
+     Locking 154 packages to latest compatible versions
+    Removing addr2line v0.24.2
+    Removing adler2 v2.0.1
+    Updating aho-corasick v1.1.3 -> v1.1.4
+    Removing android-tzdata v0.1.1
+    Updating anstream v0.6.20 -> v1.0.0
+    Updating anstyle v1.0.11 -> v1.0.14
+    Updating anstyle-parse v0.2.7 -> v1.0.0
+    Updating anstyle-query v1.1.4 -> v1.1.5
+    Updating anstyle-wincon v3.0.10 -> v3.0.11
+    Updating anyhow v1.0.98 -> v1.0.102
+    Updating autocfg v1.5.0 -> v1.5.1
+    Removing backtrace v0.3.75
+    Updating bitflags v2.9.1 -> v2.12.1
+    Updating bumpalo v3.19.0 -> v3.20.3
+    Updating bytes v1.10.1 -> v1.11.1
+    Updating cc v1.2.27 -> v1.2.63
+    Updating cfg-if v1.0.1 -> v1.0.4
+    Updating chrono v0.4.41 -> v0.4.44
+    Updating clap v4.5.45 -> v4.6.1
+    Updating clap_builder v4.5.44 -> v4.6.0
+    Updating clap_derive v4.5.45 -> v4.6.1
+    Updating clap_lex v0.7.5 -> v1.1.0
+    Updating colorchoice v1.0.4 -> v1.0.5
+      Adding core-foundation v0.10.1
+    Updating crypto-common v0.1.6 -> v0.1.7
+    Updating csv v1.3.1 -> v1.4.0
+    Updating csv-core v0.1.12 -> v0.1.13
+    Updating displaydoc v0.2.5 -> v0.2.6
+    Updating errno v0.3.13 -> v0.3.14
+    Updating fastrand v2.3.0 -> v2.4.1
+      Adding find-msvc-tools v0.1.9
+      Adding foldhash v0.2.0
+    Updating form_urlencoded v1.2.1 -> v1.2.2
+    Updating futures v0.3.31 -> v0.3.32
+    Updating futures-channel v0.3.31 -> v0.3.32
+    Updating futures-core v0.3.31 -> v0.3.32
+    Updating futures-executor v0.3.31 -> v0.3.32
+    Updating futures-io v0.3.31 -> v0.3.32
+    Updating futures-macro v0.3.31 -> v0.3.32
+    Updating futures-sink v0.3.31 -> v0.3.32
+    Updating futures-task v0.3.31 -> v0.3.32
+    Updating futures-util v0.3.31 -> v0.3.32
+    Updating getrandom v0.3.3 -> v0.4.2
+    Removing gimli v0.31.1
+    Updating h2 v0.3.26 -> v0.3.27
+    Removing hashbrown v0.15.4
+      Adding hashbrown v0.15.5
+      Adding hashbrown v0.16.1
+      Adding hashbrown v0.17.1
+    Updating humantime v2.2.0 -> v2.3.0
+    Updating iana-time-zone v0.1.63 -> v0.1.65
+    Updating icu_collections v2.0.0 -> v2.2.0
+    Updating icu_locale_core v2.0.0 -> v2.2.0
+    Updating icu_normalizer v2.0.0 -> v2.2.0
+    Updating icu_normalizer_data v2.0.0 -> v2.2.0
+    Updating icu_properties v2.0.1 -> v2.2.0
+    Updating icu_properties_data v2.0.1 -> v2.2.0
+    Updating icu_provider v2.0.0 -> v2.2.0
+      Adding id-arena v2.3.0
+    Updating idna v1.0.3 -> v1.1.0
+    Updating idna_adapter v1.2.1 -> v1.2.2
+    Updating indexmap v2.10.0 -> v2.14.0
+    Removing io-uring v0.7.8
+    Updating ipnet v2.11.0 -> v2.12.0
+    Updating is-terminal v0.4.16 -> v0.4.17
+    Updating is_terminal_polyfill v1.70.1 -> v1.70.2
+    Updating itoa v1.0.15 -> v1.0.18
+    Updating js-sys v0.3.77 -> v0.3.99
+      Adding leb128fmt v0.1.0
+    Updating libc v0.2.174 -> v0.2.186
+    Updating linux-raw-sys v0.9.4 -> v0.12.1
+    Updating litemap v0.8.0 -> v0.8.2
+    Updating lock_api v0.4.13 -> v0.4.14
+    Updating log v0.4.27 -> v0.4.31
+    Updating lru v0.16.0 -> v0.16.4 (available: v0.18.0)
+    Updating memchr v2.7.5 -> v2.8.1
+    Removing miniz_oxide v0.8.9
+    Updating mio v1.0.4 -> v1.2.1
+    Updating native-tls v0.2.14 -> v0.2.18
+    Removing object v0.36.7
+    Updating once_cell v1.21.3 -> v1.21.4
+    Updating once_cell_polyfill v1.70.1 -> v1.70.2
+    Updating openssl v0.10.73 -> v0.10.80
+    Updating openssl-probe v0.1.6 -> v0.2.1
+    Updating openssl-sys v0.9.109 -> v0.9.116
+    Updating parking_lot v0.12.4 -> v0.12.5
+    Updating parking_lot_core v0.9.11 -> v0.9.12
+    Updating percent-encoding v2.3.1 -> v2.3.2
+    Updating pin-project-lite v0.2.16 -> v0.2.17
+    Removing pin-utils v0.1.0
+    Updating pkg-config v0.3.32 -> v0.3.33
+    Updating potential_utf v0.1.2 -> v0.1.5
+      Adding prettyplease v0.2.37
+    Updating proc-macro2 v1.0.95 -> v1.0.106
+    Updating quote v1.0.40 -> v1.0.45
+    Updating r-efi v5.3.0 -> v6.0.0
+    Updating redox_syscall v0.5.13 -> v0.5.18
+    Updating regex v1.11.1 -> v1.12.3
+    Updating regex-automata v0.4.9 -> v0.4.14
+    Updating regex-syntax v0.8.5 -> v0.8.10
+    Removing rustc-demangle v0.1.25
+    Updating rustix v1.0.7 -> v1.1.4
+    Updating rustversion v1.0.21 -> v1.0.22
+    Updating ryu v1.0.20 -> v1.0.23
+    Updating schannel v0.1.27 -> v0.1.29
+    Updating security-framework v2.11.1 -> v3.7.0
+    Updating security-framework-sys v2.14.0 -> v2.17.0
+      Adding semver v1.0.28
+    Updating serde v1.0.219 -> v1.0.228
+      Adding serde_core v1.0.228
+    Updating serde_derive v1.0.219 -> v1.0.228
+    Updating serde_json v1.0.140 -> v1.0.150
+    Updating shlex v1.3.0 -> v2.0.1
+    Updating signal-hook-registry v1.4.5 -> v1.4.8
+    Updating slab v0.4.10 -> v0.4.12
+      Adding socket2 v0.6.4
+    Updating stable_deref_trait v1.2.0 -> v1.2.1
+    Updating syn v2.0.104 -> v2.0.117
+    Updating tempfile v3.20.0 -> v3.27.0
+    Updating tinystr v0.8.1 -> v0.8.3
+    Updating tokio v1.46.0 -> v1.52.3
+    Updating tokio-macros v2.5.0 -> v2.7.0
+    Updating tokio-util v0.7.15 -> v0.7.18
+    Updating tracing v0.1.41 -> v0.1.44
+    Updating tracing-core v0.1.34 -> v0.1.36
+    Updating typenum v1.18.0 -> v1.20.1
+    Updating unicode-ident v1.0.18 -> v1.0.24
+      Adding unicode-xid v0.2.6
+    Updating url v2.5.4 -> v2.5.8
+    Removing wasi v0.14.2+wasi-0.2.4
+      Adding wasip2 v1.0.3+wasi-0.2.9
+      Adding wasip3 v0.4.0+wasi-0.3.0-rc-2026-01-06
+    Updating wasm-bindgen v0.2.100 -> v0.2.122
+    Removing wasm-bindgen-backend v0.2.100
+    Updating wasm-bindgen-futures v0.4.50 -> v0.4.72
+    Updating wasm-bindgen-macro v0.2.100 -> v0.2.122
+    Updating wasm-bindgen-macro-support v0.2.100 -> v0.2.122
+    Updating wasm-bindgen-shared v0.2.100 -> v0.2.122
+      Adding wasm-encoder v0.244.0
+      Adding wasm-metadata v0.244.0
+      Adding wasmparser v0.244.0
+    Updating web-sys v0.3.77 -> v0.3.99
+    Updating winapi-util v0.1.9 -> v0.1.11
+    Updating windows-core v0.61.2 -> v0.62.2
+    Updating windows-implement v0.60.0 -> v0.60.2
+    Updating windows-interface v0.59.1 -> v0.59.3
+    Updating windows-link v0.1.3 -> v0.2.1
+    Updating windows-result v0.3.4 -> v0.4.1
+    Updating windows-strings v0.4.2 -> v0.5.1
+    Updating windows-sys v0.60.2 -> v0.61.2
+    Removing windows-targets v0.53.2
+    Removing windows_aarch64_gnullvm v0.53.0
+    Removing windows_aarch64_msvc v0.53.0
+    Removing windows_i686_gnu v0.53.0
+    Removing windows_i686_gnullvm v0.53.0
+    Removing windows_i686_msvc v0.53.0
+    Removing windows_x86_64_gnu v0.53.0
+    Removing windows_x86_64_gnullvm v0.53.0
+    Removing windows_x86_64_msvc v0.53.0
+    Updating winnow v0.7.12 -> v0.7.15
+      Adding wit-bindgen v0.51.0
+      Adding wit-bindgen v0.57.1
+      Adding wit-bindgen-core v0.51.0
+    Removing wit-bindgen-rt v0.39.0
+      Adding wit-bindgen-rust v0.51.0
+      Adding wit-bindgen-rust-macro v0.51.0
+      Adding wit-component v0.244.0
+      Adding wit-parser v0.244.0
+    Updating writeable v0.6.1 -> v0.6.3
+    Updating yoke v0.8.0 -> v0.8.2
+    Updating yoke-derive v0.8.0 -> v0.8.2
+    Updating zerofrom v0.1.6 -> v0.1.8
+    Updating zerofrom-derive v0.1.6 -> v0.1.7
+    Updating zerotrie v0.2.2 -> v0.2.4
+    Updating zerovec v0.11.2 -> v0.11.6
+    Updating zerovec-derive v0.11.1 -> v0.11.3
+      Adding zmij v1.0.21
+note: pass `--verbose` to see 7 unchanged dependencies behind latest
+warning: not updating lockfile due to dry run
