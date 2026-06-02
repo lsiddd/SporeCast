@@ -1,4 +1,4 @@
-pub const PALO_ALTO_HEADERS: &[&str] = &[
+pub(super) const PALO_ALTO_HEADERS: &[&str] = &[
     "Log Number",
     "Receive Time",
     "Serial Number",
@@ -116,7 +116,7 @@ pub const PALO_ALTO_HEADERS: &[&str] = &[
     "Offloaded",
 ];
 
-pub const INTEGER_FIELDS: &[&str] = &[
+pub(super) const INTEGER_FIELDS: &[&str] = &[
     "Log Number",
     "Config Version",
     "Session ID",
@@ -138,4 +138,4 @@ pub const INTEGER_FIELDS: &[&str] = &[
     "Application-Risk",
 ];
 
-pub const FLOAT_FIELDS: &[&str] = &["High-Resolution-Timestamp"];
+pub(super) const FLOAT_FIELDS: &[&str] = &["High-Resolution-Timestamp"];

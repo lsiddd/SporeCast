@@ -11,8 +11,8 @@ use std::{
 };
 use tokio::{io::AsyncWriteExt, task, time::timeout};
 
-use crate::performance::{get_circuit_breaker, ConnectionPool};
-use crate::unified_config::CONNECTION_POOL_SIZE;
+use crate::infrastructure::defaults::CONNECTION_POOL_SIZE;
+use crate::infrastructure::performance::{get_circuit_breaker, CircuitBreaker, ConnectionPool};
 
 mod wazuh;
 pub use wazuh::{wazuh_enriched_syslog_sender_thread, wazuh_raw_syslog_sender_thread};
@@ -133,7 +133,7 @@ pub async fn test_initial_connection(elk_host: &str, elk_port: u16) -> Result<()
 async fn flush_batch_to_elk(
     batch: &[Value],
     pool: &Arc<ConnectionPool>,
-    circuit_breaker: &Arc<crate::performance::CircuitBreaker>,
+    circuit_breaker: &Arc<CircuitBreaker>,
 ) -> Result<()> {
     if batch.is_empty() {
         return Ok(());

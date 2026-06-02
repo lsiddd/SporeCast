@@ -1,5 +1,5 @@
 use super::*;
-use crate::behavioral::AlertHistory;
+use crate::domain::behavioral::AlertHistory;
 
 #[test]
 fn extracts_iocs_from_nested_json_strings() {
@@ -23,7 +23,7 @@ fn adds_enrichment_when_ioc_matches_threat_intel() {
     let mut state = AlertHistory::default();
     let log = json!({ "url": "http://malicious.example/path" });
 
-    let enriched = enrich_and_analyze_log(log, &intel, &mut state);
+    let enriched = enrich_and_analyze_log(log, &intel, &mut state, None);
 
     assert!(enriched.get("forwarder_enrichment").is_some());
 }

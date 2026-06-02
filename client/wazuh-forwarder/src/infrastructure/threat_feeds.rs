@@ -3,7 +3,7 @@ use log::{debug, info, warn};
 use reqwest::Client;
 use std::{collections::HashSet, fs, path::Path, time::Duration};
 
-use crate::unified_config::{THREAT_INTEL_CACHE_DIR, THREAT_INTEL_REFRESH_INTERVAL_SECS};
+use crate::infrastructure::defaults::{THREAT_INTEL_CACHE_DIR, THREAT_INTEL_REFRESH_INTERVAL_SECS};
 
 fn get_cache_filepath(url: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -49,7 +49,7 @@ fn is_cache_valid(filepath: &str) -> bool {
 }
 
 #[tracing::instrument]
-pub(super) async fn download_feed(url: &str) -> Result<HashSet<String>> {
+pub(crate) async fn download_feed(url: &str) -> Result<HashSet<String>> {
     let cache_filepath = get_cache_filepath(url);
     if is_cache_valid(&cache_filepath) {
         info!("Using cached feed for {}.", url);

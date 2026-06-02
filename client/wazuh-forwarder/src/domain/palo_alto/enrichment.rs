@@ -2,9 +2,14 @@ use log::{debug, info, warn};
 use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc};
 
-use crate::behavioral::AlertHistory;
-use crate::threat_intel::ThreatIntel;
-use crate::unified_config::*;
+use crate::domain::behavioral::AlertHistory;
+use crate::domain::indicators::{is_public_ip, ThreatIntel};
+use crate::domain::ports::GeoIpLookup;
+use crate::domain::rules::{
+    CORRELATION_RULES_COMPILED, CRITICAL_ASSETS, DOMAIN_REGEX, ENABLE_BEHAVIORAL_ANALYSIS,
+    HASH_REGEX, IP_REGEX, SUSPICIOUS_PATTERNS_COMPILED, SUSPICIOUS_PROCESSES, URL_REGEX,
+};
+use crate::infrastructure::geoip::GeoIpEnricher;
 
 #[cfg(test)]
 #[path = "enrichment_tests.rs"]
@@ -58,11 +63,12 @@ pub fn extract_iocs(log_data: &Value) -> HashMap<&'static str, Vec<String>> {
 }
 
 // Main function for enriching and analyzing a single log.
-/// Adds threat-intelligence, hunting, and behavioral enrichment to a parsed log.
+/// Adds threat-intelligence, hunting, behavioral, and GeoIP enrichment to a parsed log.
 pub fn enrich_and_analyze_log(
     mut log_data: Value,
     intel: &Arc<ThreatIntel>,
     state: &mut AlertHistory,
+    geoip: Option<&GeoIpEnricher>,
 ) -> Value {
     debug!("Starting enrichment and analysis for log.");
     let iocs = extract_iocs(&log_data);
@@ -264,6 +270,13 @@ pub fn enrich_and_analyze_log(
         }
     }
 
+    apply_geoip_enrichment(
+        geoip.map(|geo| geo as &dyn GeoIpLookup),
+        &log_data,
+        &mut enrichment_data,
+        &mut found_enrichment,
+    );
+
     if found_enrichment {
         if let Some(obj) = log_data.as_object_mut() {
             enrichment_data["intel_last_updated"] = json!(intel.last_updated.to_rfc3339());
@@ -272,4 +285,41 @@ pub fn enrich_and_analyze_log(
         }
     }
     log_data
+}
+
+fn apply_geoip_enrichment(
+    geoip: Option<&dyn GeoIpLookup>,
+    log_data: &Value,
+    enrichment_data: &mut Value,
+    found_enrichment: &mut bool,
+) {
+    if let Some(geo) = geoip {
+        let mut geoip_data = json!({});
+        let mut found_geo = false;
+
+        if let Some(src) = log_data
+            .get("Source address")
+            .and_then(Value::as_str)
+            .filter(|ip| is_public_ip(ip))
+            .and_then(|ip| geo.lookup(ip))
+        {
+            geoip_data["src"] = src;
+            found_geo = true;
+        }
+
+        if let Some(dst) = log_data
+            .get("Destination address")
+            .and_then(Value::as_str)
+            .filter(|ip| is_public_ip(ip))
+            .and_then(|ip| geo.lookup(ip))
+        {
+            geoip_data["dst"] = dst;
+            found_geo = true;
+        }
+
+        if found_geo {
+            enrichment_data["geoip"] = geoip_data;
+            *found_enrichment = true;
+        }
+    }
 }

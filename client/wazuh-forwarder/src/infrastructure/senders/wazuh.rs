@@ -10,7 +10,7 @@ use std::{
 };
 use tokio::{net::UdpSocket, task, time::timeout};
 
-use crate::performance::get_circuit_breaker;
+use crate::infrastructure::performance::get_circuit_breaker;
 
 #[allow(dead_code)]
 /// Sends raw syslog lines to the local Wazuh syslog endpoint over UDP.

@@ -11,16 +11,18 @@ use std::{
 };
 use tokio::{net::UdpSocket, time::timeout};
 
-use crate::behavioral::{AlertHistory, StateManager};
-use crate::palo_alto_parsing::{
+use crate::application::state::StateManager;
+use crate::domain::palo_alto::{
     enrich_and_analyze_log, format_json_to_palo_alto_syslog, parse_palo_alto_log_to_json,
 };
-use crate::performance::QUEUE_MONITOR;
-use crate::threat_intel::ThreatIntel;
-use crate::unified_config::*;
+use crate::domain::{behavioral::AlertHistory, indicators::ThreatIntel};
+use crate::infrastructure::defaults::{
+    DISABLE_BEHAVIORAL_UNDER_HIGH_LOAD, MAX_RECEIVER_QUEUE_SIZE,
+};
+use crate::infrastructure::geoip::GeoIpEnricher;
+use crate::infrastructure::performance::QUEUE_MONITOR;
 
-mod senders;
-pub use senders::{
+pub use crate::infrastructure::senders::{
     elk_sender_thread, test_initial_connection, wazuh_enriched_syslog_sender_thread,
     wazuh_raw_syslog_sender_thread,
 };
@@ -103,7 +105,8 @@ pub async fn palo_alto_syslog_receiver_thread(
     wazuh_enriched_tx,
     threat_intel,
     state_merger_tx,
-    shutdown
+    shutdown,
+    geoip
 ))]
 pub fn palo_alto_enrichment_worker_thread(
     worker_id: usize,
@@ -113,6 +116,7 @@ pub fn palo_alto_enrichment_worker_thread(
     threat_intel: Arc<Mutex<ThreatIntel>>,
     state_merger_tx: Sender<AlertHistory>,
     shutdown: Arc<AtomicBool>,
+    geoip: Option<Arc<GeoIpEnricher>>,
 ) -> Result<()> {
     info!(
         "[Worker {}] Starting Palo Alto enrichment worker thread",
@@ -146,8 +150,12 @@ pub fn palo_alto_enrichment_worker_thread(
                                     .map_err(|_| anyhow!("threat intelligence mutex poisoned"))?;
                                 Arc::new(intel_guard.clone())
                             };
-                            parsed_log =
-                                enrich_and_analyze_log(parsed_log, &intel_arc, &mut worker_state);
+                            parsed_log = enrich_and_analyze_log(
+                                parsed_log,
+                                &intel_arc,
+                                &mut worker_state,
+                                geoip.as_deref(),
+                            );
 
                             if parsed_log.get("forwarder_enrichment").is_some() {
                                 enriched_count = enriched_count.saturating_add(1);

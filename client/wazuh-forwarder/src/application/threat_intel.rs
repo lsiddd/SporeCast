@@ -1,8 +1,9 @@
-use chrono::{DateTime, Utc};
+//! Threat intelligence updater orchestration.
+
+use chrono::Utc;
 use log::{debug, error, info};
 use std::{
-    collections::{HashMap, HashSet},
-    net::Ipv4Addr,
+    collections::HashMap,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -11,76 +12,12 @@ use std::{
 };
 use tokio::task::JoinSet;
 
-use crate::unified_config::*;
-
-mod feed_cache;
-use feed_cache::download_feed;
-
-#[derive(Clone)]
-/// In-memory threat intelligence indicators shared by enrichment workers.
-pub struct ThreatIntel {
-    pub malicious_ips: Arc<HashMap<String, Vec<String>>>, // Stores malicious IPs and the list of feeds they appeared in.
-    pub malicious_domains: Arc<HashSet<String>>,          // Stores unique malicious domains.
-    pub malicious_hashes: Arc<HashSet<String>>,           // Stores unique malicious file hashes.
-    pub malicious_urls: Arc<HashSet<String>>,             // Stores unique malicious URLs.
-    pub last_updated: DateTime<Utc>, // Timestamp of the last successful update.
-}
-
-impl Default for ThreatIntel {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ThreatIntel {
-    /// Creates an empty threat intelligence database with a fresh update timestamp.
-    pub fn new() -> Self {
-        ThreatIntel {
-            last_updated: Utc::now(),
-            malicious_ips: Arc::new(HashMap::new()),
-            malicious_domains: Arc::new(HashSet::new()),
-            malicious_hashes: Arc::new(HashSet::new()),
-            malicious_urls: Arc::new(HashSet::new()),
-        }
-    }
-
-    /// Returns the total count of loaded indicators across all indicator types.
-    pub fn indicator_count(&self) -> usize {
-        self.malicious_ips.len()
-            + self.malicious_domains.len()
-            + self.malicious_hashes.len()
-            + self.malicious_urls.len()
-    }
-}
-
-/// Returns true when `ip_str` is a public IPv4 address.
-pub fn is_public_ip(ip_str: &str) -> bool {
-    if let Ok(ip) = ip_str.parse::<Ipv4Addr>() {
-        let is_public = !ip.is_private()
-            && !ip.is_loopback()
-            && !ip.is_unspecified()
-            && !ip.is_multicast()
-            && !ip.is_documentation();
-        debug!("Checking IP '{}': is_private={}, is_loopback={}, is_unspecified={}, is_multicast={}, is_documentation={}, result={}",
-                ip_str, ip.is_private(), ip.is_loopback(), ip.is_unspecified(), ip.is_multicast(), ip.is_documentation(), is_public);
-        is_public
-    } else {
-        debug!("IP '{}' is not a valid Ipv4Addr.", ip_str);
-        false
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_public_ip;
-
-    #[test]
-    fn public_ip_filter_rejects_private_and_accepts_public_ipv4() {
-        assert!(!is_public_ip("10.0.0.1"));
-        assert!(!is_public_ip("127.0.0.1"));
-        assert!(is_public_ip("8.8.8.8"));
-    }
-}
+use crate::domain::indicators::{is_public_ip, ThreatIntel};
+use crate::infrastructure::defaults::{
+    DOMAIN_FEED_URLS, HASH_FEED_URLS, IP_FEED_URLS, THREAT_INTEL_REFRESH_INTERVAL_SECS,
+    URL_FEED_URLS,
+};
+use crate::infrastructure::threat_feeds::download_feed;
 
 /// Periodically refreshes the shared threat intelligence database until shutdown.
 pub async fn threat_intel_updater_thread(
@@ -91,11 +28,9 @@ pub async fn threat_intel_updater_thread(
         "Threat intelligence updater task started. Will refresh every {} seconds.",
         THREAT_INTEL_REFRESH_INTERVAL_SECS
     );
-    // Initial sleep to allow other components to start up, and prevent immediate burst of downloads.
     tokio::time::sleep(Duration::from_secs(5)).await;
 
     loop {
-        // Check for shutdown signal more frequently, without relying on long sleeps
         if shutdown.load(Ordering::Relaxed) {
             info!("Threat intel updater received shutdown signal.");
             break;
@@ -103,10 +38,9 @@ pub async fn threat_intel_updater_thread(
 
         info!("Initiating threat intelligence database update cycle.");
 
-        let mut new_intel = ThreatIntel::new(); // Create a new intel object to build up.
+        let mut new_intel = ThreatIntel::new();
         let mut join_set = JoinSet::new();
 
-        // --- Fetch Malicious IPs ---
         info!("Fetching malicious IP feeds...");
         for url in IP_FEED_URLS.iter() {
             let url_str = url.to_string();
@@ -136,7 +70,6 @@ pub async fn threat_intel_updater_thread(
             new_intel.malicious_ips.len()
         );
 
-        // --- Fetch other feeds concurrently using a new JoinSet ---
         let mut other_join_set = JoinSet::new();
 
         for url in URL_FEED_URLS.iter() {
@@ -164,7 +97,6 @@ pub async fn threat_intel_updater_thread(
                         feed_type,
                         url
                     );
-                    // Update new_intel directly, not the shared one until fully built.
                     let target_arc_ref = match feed_type {
                         "url" => &mut new_intel.malicious_urls,
                         "hash" => &mut new_intel.malicious_hashes,
@@ -174,8 +106,7 @@ pub async fn threat_intel_updater_thread(
                             continue;
                         }
                     };
-                    // Replace the Arc with a new one that contains the extended items
-                    let mut current_map = (**target_arc_ref).clone(); // Clone the inner map/set
+                    let mut current_map = (**target_arc_ref).clone();
                     current_map.extend(items);
                     *target_arc_ref = Arc::new(current_map);
                 }
@@ -201,7 +132,6 @@ pub async fn threat_intel_updater_thread(
         new_intel.last_updated = Utc::now();
         let total_indicators = new_intel.indicator_count();
 
-        // Acquire a lock on the shared threat intelligence database and update it.
         info!("Acquiring lock on shared threat intelligence database for update.");
         match intel_db.lock() {
             Ok(mut intel) => {
@@ -220,14 +150,13 @@ pub async fn threat_intel_updater_thread(
             total_indicators
         );
 
-        // Sleep until next refresh, but check shutdown flag every second.
         debug!(
             "Threat intelligence updater sleeping for {} seconds until next refresh.",
             THREAT_INTEL_REFRESH_INTERVAL_SECS
         );
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         for _ in 0..THREAT_INTEL_REFRESH_INTERVAL_SECS {
-            interval.tick().await; // Wait for the next tick, non-blocking
+            interval.tick().await;
             if shutdown.load(Ordering::Relaxed) {
                 info!("Threat intel updater received shutdown signal during sleep.");
                 break;

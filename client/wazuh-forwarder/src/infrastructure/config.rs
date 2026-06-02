@@ -3,14 +3,21 @@ use std::fs;
 use std::path::Path;
 use thiserror::Error;
 
-use crate::palo_alto_config::{ELK_HOST, ELK_PORT, LOG_FILE, PALO_ALTO_SYSLOG_PORT, STATE_FILE};
-use crate::unified_config::{
-    BEHAVIOR_WINDOW_MINUTES, ELK_BATCH_FLUSH_INTERVAL_SECS, ELK_BATCH_SIZE,
-    ENABLE_BEHAVIORAL_ANALYSIS, ENABLE_THREAT_INTEL_FEEDS, ENRICHMENT_WORKER_COUNT,
-    HIGH_SEVERITY_THRESHOLD, MAX_ENRICHMENT_QUEUE_SIZE, MAX_RECEIVER_QUEUE_SIZE,
+use crate::domain::rules::{
+    BEHAVIOR_WINDOW_MINUTES, ENABLE_BEHAVIORAL_ANALYSIS, HIGH_SEVERITY_THRESHOLD,
+};
+use crate::infrastructure::defaults::{
+    ELK_BATCH_FLUSH_INTERVAL_SECS, ELK_BATCH_SIZE, ENABLE_THREAT_INTEL_FEEDS,
+    ENRICHMENT_WORKER_COUNT, MAX_ENRICHMENT_QUEUE_SIZE, MAX_RECEIVER_QUEUE_SIZE,
     MAX_WAZUH_QUEUE_SIZE, SOCKET_TIMEOUT_SECS, THREAT_INTEL_CACHE_DIR,
     THREAT_INTEL_REFRESH_INTERVAL_SECS, WAZUH_LOCAL_SYSLOG_HOST, WAZUH_LOCAL_SYSLOG_PORT,
 };
+
+const PALO_ALTO_SYSLOG_PORT: u16 = 514;
+const ELK_HOST: &str = "127.0.0.1";
+const ELK_PORT: u16 = 5142;
+const LOG_FILE: &str = "/var/log/palo_alto_forwarder.log";
+const STATE_FILE: &str = "/var/lib/palo-alto-forwarder/forwarder_state.json";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 /// Complete runtime configuration loaded from TOML.
@@ -23,6 +30,8 @@ pub struct ForwarderConfig {
     pub behavioral_analysis: BehavioralConfig,
     #[serde(default)]
     pub palo_alto: PaloAltoConfig,
+    #[serde(default)]
+    pub geoip: GeoIpConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -82,6 +91,22 @@ pub struct BehavioralConfig {
 /// Palo Alto-specific extension point for future settings.
 pub struct PaloAltoConfig {
     // Add Palo Alto-specific settings here if needed
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+/// GeoIP database settings for IP geolocation enrichment.
+pub struct GeoIpConfig {
+    pub enabled: bool,
+    pub database_path: String,
+}
+
+impl Default for GeoIpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            database_path: "/var/lib/palo-alto-forwarder/geoip/dbip-city-lite.mmdb".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -147,6 +172,7 @@ impl Default for ForwarderConfig {
                 high_severity_threshold: HIGH_SEVERITY_THRESHOLD,
             },
             palo_alto: PaloAltoConfig::default(),
+            geoip: GeoIpConfig::default(),
         }
     }
 }
@@ -172,7 +198,7 @@ impl ForwarderConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         // Validate forwarder type
         match self.forwarder.forwarder_type.as_str() {
-            "palo_alto" => {}
+            "palo_alto" | "tshark" => {}
             _ => {
                 return Err(ConfigError::validation(format!(
                     "invalid forwarder type: {}",

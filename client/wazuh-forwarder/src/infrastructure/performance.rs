@@ -10,7 +10,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::unified_config::*;
+use crate::infrastructure::defaults::{
+    CIRCUIT_BREAKER_FAILURE_THRESHOLD, CIRCUIT_BREAKER_SUCCESS_THRESHOLD,
+    CIRCUIT_BREAKER_TIMEOUT_SECS, HIGH_WORKLOAD_THRESHOLD, QUEUE_MONITORING_INTERVAL_SECS,
+};
 
 mod connection_pool;
 mod string_pool;

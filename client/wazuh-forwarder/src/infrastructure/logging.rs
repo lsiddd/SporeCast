@@ -3,11 +3,15 @@ use chrono::Local;
 use log::{info, LevelFilter};
 use std::{fs::OpenOptions, io, thread};
 
-use crate::{config_reader::ForwarderConfig, palo_alto_config::NO_LOG_FILE};
+use crate::infrastructure::config::ForwarderConfig;
+
+const NO_LOG_FILE: bool = true;
 
 /// Configures process-wide logging for the forwarder binary.
-pub fn configure_logging(config: &ForwarderConfig) -> Result<()> {
-    let mut fern_dispatch = fern::Dispatch::new()
+///
+/// When `use_stderr` is true, logs go to stderr (use this when stdout carries JSON data).
+pub fn configure_logging_with_opts(config: &ForwarderConfig, use_stderr: bool) -> Result<()> {
+    let base = fern::Dispatch::new()
         .format(|out, message, record| {
             out.finish(format_args!(
                 "{} - {} - {} - {}",
@@ -17,12 +21,19 @@ pub fn configure_logging(config: &ForwarderConfig) -> Result<()> {
                 message
             ))
         })
-        .level(LevelFilter::Info)
-        .chain(io::stdout());
+        .level(LevelFilter::Info);
 
-    if NO_LOG_FILE {
+    let mut fern_dispatch = if use_stderr {
+        base.chain(io::stderr())
+    } else {
+        base.chain(io::stdout())
+    };
+
+    if NO_LOG_FILE || use_stderr {
         fern_dispatch.apply()?;
-        info!("Logging configured for stdout only (log file writes disabled).");
+        if !use_stderr {
+            info!("Logging configured for stdout only (log file writes disabled).");
+        }
     } else {
         let log_file_path = config.logging.log_file.as_str();
         let log_file_result = OpenOptions::new()
@@ -49,4 +60,9 @@ pub fn configure_logging(config: &ForwarderConfig) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Configures process-wide logging for the forwarder binary.
+pub fn configure_logging(config: &ForwarderConfig) -> Result<()> {
+    configure_logging_with_opts(config, false)
 }

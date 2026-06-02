@@ -3,25 +3,23 @@ use chrono::Local;
 use clap::Parser;
 use crossbeam_channel::bounded;
 use log::{error, info, warn};
-use signal_hook::{
-    consts::{SIGINT, SIGTERM},
-    iterator::Signals,
-};
 use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
+    sync::{atomic::AtomicBool, Arc, Mutex},
     thread,
 };
 
 use wazuh_forwarder::{
-    behavioral::StateManager,
-    config_reader::ForwarderConfig,
-    logging::configure_logging,
-    palo_alto_config::*,
-    palo_alto_workers::*,
-    threat_intel::{threat_intel_updater_thread, ThreatIntel},
+    application::runtime::{spawn_palo_alto_signal_handler, state_merger_queue_size},
+    application::state::StateManager,
+    application::threat_intel::threat_intel_updater_thread,
+    application::workers::{
+        elk_sender_thread, palo_alto_enrichment_worker_thread, palo_alto_syslog_receiver_thread,
+        state_merger_thread, test_initial_connection, wazuh_enriched_syslog_sender_thread,
+    },
+    domain::indicators::ThreatIntel,
+    infrastructure::config::ForwarderConfig,
+    infrastructure::geoip::GeoIpEnricher,
+    infrastructure::logging::configure_logging,
 };
 
 #[derive(Parser)]
@@ -94,31 +92,14 @@ async fn main() -> Result<()> {
 
     // Signal Handling
     let shutdown = Arc::new(AtomicBool::new(false));
-    let mut signals =
-        Signals::new([SIGINT, SIGTERM]).context("Failed to register signal handlers")?;
-    let signal_shutdown = shutdown.clone();
-    thread::Builder::new()
-        .name("signal_handler".to_string())
-        .spawn(move || {
-            info!("Signal handler thread started. Waiting for SIGINT or SIGTERM.");
-            if let Some(sig) = signals.forever().next() {
-                warn!(
-                    "Received OS signal {:?}. Initiating graceful shutdown sequence...",
-                    sig
-                );
-                signal_shutdown.store(true, Ordering::Release);
-            }
-            info!("Signal handler thread finished.");
-        })?;
+    let _signal_handler = spawn_palo_alto_signal_handler(shutdown.clone())?;
 
     // Channels
     let (raw_log_tx, raw_log_rx) = bounded(max_receiver_queue);
     let (elk_tx, elk_rx) = bounded(max_enrichment_queue);
     let (wazuh_enriched_tx, wazuh_enriched_rx) = bounded(max_wazuh_queue);
-    let state_merger_queue_size = enrichment_worker_count
-        .checked_mul(2)
-        .ok_or_else(|| anyhow!("enrichment worker count is too large"))?;
-    let (state_merger_tx, state_merger_rx) = bounded(state_merger_queue_size);
+    let (state_merger_tx, state_merger_rx) =
+        bounded(state_merger_queue_size(enrichment_worker_count)?);
 
     // State Manager
     let mut state_manager_instance = StateManager::new(&state_file);
@@ -130,9 +111,17 @@ async fn main() -> Result<()> {
     }
     let state_manager = Arc::new(Mutex::new(state_manager_instance));
 
+    // GeoIP
+    let geoip_enricher: Option<Arc<GeoIpEnricher>> = if config.geoip.enabled {
+        GeoIpEnricher::open(&config.geoip.database_path).map(Arc::new)
+    } else {
+        info!("GeoIP enrichment disabled in config.");
+        None
+    };
+
     // Threat Intel
     let threat_intel_db = Arc::new(Mutex::new(ThreatIntel::new()));
-    let threat_intel_handle = if ENABLE_THREAT_INTEL_FEEDS {
+    let threat_intel_handle = if config.threat_intelligence.enable_threat_intel_feeds {
         let intel_clone = threat_intel_db.clone();
         let shutdown_clone = shutdown.clone();
         Some(tokio::spawn(async move {
@@ -187,6 +176,7 @@ async fn main() -> Result<()> {
         let intel_db_clone = threat_intel_db.clone();
         let state_merger_tx_clone = state_merger_tx.clone();
         let shutdown_clone = shutdown.clone();
+        let geoip_clone = geoip_enricher.clone();
 
         let handle = thread::Builder::new()
             .name(format!("pa_enrich_worker_{}", i))
@@ -199,6 +189,7 @@ async fn main() -> Result<()> {
                     intel_db_clone,
                     state_merger_tx_clone,
                     shutdown_clone,
+                    geoip_clone,
                 ) {
                     error!("[Worker {}] Palo Alto enrichment worker thread encountered a critical error: {}", i, e);
                 }
