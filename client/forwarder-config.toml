@@ -56,3 +56,10 @@ high_severity_threshold = 10
 [palo_alto]
 # Palo Alto-specific configuration
 # This section is used when forwarder.type = "palo_alto"
+
+[geoip]
+# GeoIP database for IP geolocation enrichment.
+# Download: https://db-ip.com/db/download/ip-to-city-lite (free MMDB, no account needed)
+# Or use MaxMind GeoLite2-City.mmdb if you have a license key.
+enabled = true
+database_path = "/var/lib/palo-alto-forwarder/geoip/dbip-city-lite.mmdb"

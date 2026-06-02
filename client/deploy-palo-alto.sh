@@ -24,6 +24,8 @@ TARGET_CONFIG_PATH="/etc/forwarder/${CONFIG_FILE}"
 DEFAULT_LOG_FILE="/var/log/palo_alto_forwarder.log"
 DEFAULT_STATE_DIR="/var/lib/palo-alto-forwarder"
 DEFAULT_CACHE_DIR="${DEFAULT_STATE_DIR}/threat_intel_cache"
+DEFAULT_GEOIP_DIR="${DEFAULT_STATE_DIR}/geoip"
+DEFAULT_GEOIP_DB="${DEFAULT_GEOIP_DIR}/dbip-city-lite.mmdb"
 
 # --- Pre-flight Checks ---
 echo "--- Running Pre-flight Checks for Palo Alto Forwarder ---"
@@ -125,8 +127,26 @@ echo "--- Installing Files and Configuring System ---"
 echo "Creating required directories..."
 mkdir -p "${DEFAULT_STATE_DIR}"
 mkdir -p "${DEFAULT_CACHE_DIR}"
+mkdir -p "${DEFAULT_GEOIP_DIR}"
 mkdir -p "/etc/forwarder"
 echo "Created application directories"
+
+# Download GeoIP database if not present
+if [ ! -f "${DEFAULT_GEOIP_DB}" ]; then
+    YYYYMM=$(date +%Y-%m)
+    echo "Downloading GeoIP database (DB-IP City Lite ${YYYYMM})..."
+    if curl -fsSL "https://download.db-ip.com/free/dbip-city-lite-${YYYYMM}.mmdb.gz" \
+            -o /tmp/geoip.mmdb.gz 2>/dev/null; then
+        gunzip -c /tmp/geoip.mmdb.gz > "${DEFAULT_GEOIP_DB}"
+        rm -f /tmp/geoip.mmdb.gz
+        echo "GeoIP database installed to ${DEFAULT_GEOIP_DB}"
+    else
+        echo "Warning: GeoIP database download failed. GeoIP enrichment will be disabled."
+        echo "To enable later: download any GeoLite2-City.mmdb or DB-IP city MMDB to ${DEFAULT_GEOIP_DB}"
+    fi
+else
+    echo "GeoIP database already present at ${DEFAULT_GEOIP_DB}"
+fi
 
 # Create the log file
 echo "Ensuring log file exists..."

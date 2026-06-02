@@ -130,9 +130,33 @@ services:
       - SERVER_SSL_ENABLED=true
       - SERVER_SSL_CERTIFICATE=/usr/share/kibana/config/certs/elasticsearch/elasticsearch.crt
       - SERVER_SSL_KEY=/usr/share/kibana/config/certs/elasticsearch/elasticsearch.key
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -sf --cacert /usr/share/kibana/config/certs/ca/ca.crt -u elastic:$$ELASTICSEARCH_SERVICEACCOUNTTOKEN https://localhost:5601/api/status 2>/dev/null | grep -q '\"state\":\"green\"' || curl -sf --cacert /usr/share/kibana/config/certs/ca/ca.crt https://localhost:5601/api/status 2>/dev/null | grep -q '\"state\":\"green\"'"
+        ]
+      interval: 30s
+      timeout: 15s
+      retries: 20
+      start_period: 120s
     depends_on:
       kibana-setup:
         condition: service_completed_successfully
+
+  kibana-provisioner:
+    build: ./kibana-setup
+    container_name: kibana-provisioner
+    volumes:
+      - certs:/certs:ro
+      - ./kibana-setup/provision.sh:/provision/provision.sh:ro
+    environment:
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+    command: sh /provision/provision.sh
+    depends_on:
+      kibana:
+        condition: service_healthy
+    restart: "no"
 
   logstash:
     image: docker.elastic.co/logstash/logstash:8.18.2
