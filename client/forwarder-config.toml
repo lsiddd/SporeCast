@@ -17,7 +17,7 @@ wazuh_port = 1514
 
 # ELK Stack / Logstash configuration
 elk_host = "127.0.0.1"
-elk_port = 5140
+elk_port = 5142
 elk_index_name = "security-logs"  # Used for Palo Alto logs
 
 # Network timeout settings
@@ -52,17 +52,6 @@ threat_intel_cache_dir = "/var/lib/forwarder/threat_intel_cache"
 enable_behavioral_analysis = true
 behavior_window_minutes = 5
 high_severity_threshold = 10
-
-[telegram]
-# Telegram notification configuration
-enable_telegram = false
-bot_token = "YOUR_TELEGRAM_BOT_TOKEN"
-chat_id = "YOUR_TELEGRAM_CHAT_ID"
-heartbeat_interval_secs = 3600  # 1 hour
-
-[fortigate]
-# Fortigate-specific configuration
-# This section is used when forwarder.type = "fortigate"
 
 [palo_alto]
 # Palo Alto-specific configuration
