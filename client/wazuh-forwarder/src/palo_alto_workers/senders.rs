@@ -19,6 +19,8 @@ pub use wazuh::{wazuh_enriched_syslog_sender_thread, wazuh_raw_syslog_sender_thr
 
 const ELK_BATCH_ITEM_CAPACITY_ESTIMATE: usize = 512;
 
+/// Batches enriched logs and sends them to Logstash/ELK over pooled TCP connections.
+#[tracing::instrument(skip(elk_rx, shutdown))]
 pub async fn elk_sender_thread(
     elk_rx: Receiver<Value>,
     shutdown: Arc<AtomicBool>,
@@ -108,6 +110,8 @@ pub async fn elk_sender_thread(
     Ok(())
 }
 
+/// Checks whether the Logstash/ELK TCP endpoint is reachable at startup.
+#[tracing::instrument]
 pub async fn test_initial_connection(elk_host: &str, elk_port: u16) -> Result<()> {
     info!(
         "Testing initial connection to Logstash TCP input at {}:{}",
@@ -125,6 +129,7 @@ pub async fn test_initial_connection(elk_host: &str, elk_port: u16) -> Result<()
     }
 }
 
+#[tracing::instrument(skip(batch, pool, circuit_breaker), fields(batch_len = batch.len()))]
 async fn flush_batch_to_elk(
     batch: &[Value],
     pool: &Arc<ConnectionPool>,

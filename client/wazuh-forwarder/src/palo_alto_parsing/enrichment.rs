@@ -6,7 +6,11 @@ use crate::behavioral::AlertHistory;
 use crate::threat_intel::ThreatIntel;
 use crate::unified_config::*;
 
-// Extracts common IOCs (IPs, domains, hashes, URLs) from all string fields in a JSON log.
+#[cfg(test)]
+#[path = "enrichment_tests.rs"]
+mod tests;
+
+/// Extracts IPs, domains, hashes, and URLs from all string fields in a JSON log.
 pub fn extract_iocs(log_data: &Value) -> HashMap<&'static str, Vec<String>> {
     debug!("Extracting IOCs from log data.");
     let mut iocs = HashMap::new();
@@ -54,6 +58,7 @@ pub fn extract_iocs(log_data: &Value) -> HashMap<&'static str, Vec<String>> {
 }
 
 // Main function for enriching and analyzing a single log.
+/// Adds threat-intelligence, hunting, and behavioral enrichment to a parsed log.
 pub fn enrich_and_analyze_log(
     mut log_data: Value,
     intel: &Arc<ThreatIntel>,

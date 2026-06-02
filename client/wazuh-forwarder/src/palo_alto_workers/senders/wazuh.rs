@@ -13,6 +13,8 @@ use tokio::{net::UdpSocket, task, time::timeout};
 use crate::performance::get_circuit_breaker;
 
 #[allow(dead_code)]
+/// Sends raw syslog lines to the local Wazuh syslog endpoint over UDP.
+#[tracing::instrument(skip(wazuh_raw_rx, shutdown))]
 pub async fn wazuh_raw_syslog_sender_thread(
     wazuh_raw_rx: Receiver<String>,
     shutdown: Arc<AtomicBool>,
@@ -87,6 +89,8 @@ pub async fn wazuh_raw_syslog_sender_thread(
     Ok(())
 }
 
+/// Sends enriched syslog lines to the local Wazuh syslog endpoint over UDP.
+#[tracing::instrument(skip(wazuh_enriched_rx, shutdown))]
 pub async fn wazuh_enriched_syslog_sender_thread(
     wazuh_enriched_rx: Receiver<String>,
     shutdown: Arc<AtomicBool>,

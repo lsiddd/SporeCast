@@ -18,6 +18,7 @@ use schema::{FLOAT_FIELDS, INTEGER_FIELDS, PALO_ALTO_HEADERS};
 
 const PALO_ALTO_SYSLOG_PRIORITY: u16 = 134;
 
+/// Parses a Palo Alto PAN-OS CSV/syslog line into normalized JSON fields.
 pub fn parse_palo_alto_log_to_json(raw_log: &str) -> Result<Value> {
     debug!("Attempting to parse raw Palo Alto log: '{}'", raw_log);
 
@@ -38,10 +39,10 @@ pub fn parse_palo_alto_log_to_json(raw_log: &str) -> Result<Value> {
             if let Some(space_before_num) = preceding.rfind(' ') {
                 &raw_log[space_before_num + 1..]
             } else {
-                &raw_log[csv_start..]
+                raw_log
             }
         } else {
-            &raw_log[csv_start..]
+            raw_log
         }
     } else if let Some(angle_bracket_end) = raw_log.find('>') {
         &raw_log[angle_bracket_end + 1..]
@@ -130,6 +131,7 @@ pub fn parse_palo_alto_log_to_json(raw_log: &str) -> Result<Value> {
 // --- Palo Alto Syslog Formatter ---
 // Converts JSON log back to Palo Alto-compatible syslog format for Wazuh
 // ==============================================================================
+/// Formats a normalized Palo Alto JSON log into a Wazuh-friendly syslog line.
 pub fn format_json_to_palo_alto_syslog(log_json: &Value) -> Result<String> {
     let mut parts = Vec::new();
 
@@ -231,4 +233,41 @@ pub fn format_json_to_palo_alto_syslog(log_json: &Value) -> Result<String> {
     let body = parts.join(" ");
 
     Ok(format!("<{}>PaloAlto: {}", PALO_ALTO_SYSLOG_PRIORITY, body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parses_palo_alto_csv_fields_to_normalized_json() {
+        let raw =
+            "1,2026/06/02 12:00:00,SERIAL,TRAFFIC,threat,42,2026/06/02 12:00:01,10.0.0.1,8.8.8.8";
+        let parsed = parse_palo_alto_log_to_json(raw).expect("sample CSV should parse");
+
+        assert_eq!(parsed["log_number"], 1);
+        assert_eq!(parsed["serial_number"], "SERIAL");
+        assert_eq!(parsed["source_address"], "10.0.0.1");
+        assert_eq!(parsed["destination_address"], "8.8.8.8");
+        assert_eq!(parsed["log_source"], "palo_alto");
+    }
+
+    #[test]
+    fn formats_selected_json_fields_as_syslog() {
+        let log = json!({
+            "device_name": "pa-01",
+            "serial_number": "SERIAL",
+            "source_address": "10.0.0.1",
+            "destination_address": "8.8.8.8",
+            "action": "allow"
+        });
+
+        let formatted = format_json_to_palo_alto_syslog(&log).expect("object should format");
+
+        assert!(formatted.starts_with("<134>PaloAlto:"));
+        assert!(formatted.contains("device_name=pa-01"));
+        assert!(formatted.contains("src_ip=10.0.0.1"));
+        assert!(formatted.contains("dst_ip=8.8.8.8"));
+    }
 }

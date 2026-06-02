@@ -5,6 +5,7 @@ use std::{fs::OpenOptions, io, thread};
 
 use crate::{config_reader::ForwarderConfig, palo_alto_config::NO_LOG_FILE};
 
+/// Configures process-wide logging for the forwarder binary.
 pub fn configure_logging(config: &ForwarderConfig) -> Result<()> {
     let mut fern_dispatch = fern::Dispatch::new()
         .format(|out, message, record| {

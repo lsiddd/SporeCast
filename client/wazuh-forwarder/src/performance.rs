@@ -23,12 +23,14 @@ pub use string_pool::{StringPool, STRING_POOL};
 // ==============================================================================
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
+/// Current state of a downstream circuit breaker.
 pub enum CircuitState {
     Closed,   // Normal operation
     Open,     // Failures detected, blocking calls
     HalfOpen, // Testing if service recovered
 }
 
+/// Circuit breaker for downstream services that may fail or become unavailable.
 pub struct CircuitBreaker {
     state: AtomicUsize, // 0=Closed, 1=Open, 2=HalfOpen
     failure_count: AtomicUsize,
@@ -153,6 +155,7 @@ pub fn get_circuit_breaker(name: &str) -> Arc<CircuitBreaker> {
 // Tracks queue utilization and triggers degradation modes
 // ==============================================================================
 
+/// Tracks queue utilization and exposes a global high-load signal.
 pub struct QueueMonitor {
     pub is_high_load: AtomicBool,
     pub last_report: Mutex<Instant>,

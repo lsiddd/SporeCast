@@ -13,6 +13,7 @@ use crate::unified_config::{
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+/// Complete runtime configuration loaded from TOML.
 pub struct ForwarderConfig {
     pub forwarder: ForwarderType,
     pub network: NetworkConfig,
@@ -25,12 +26,14 @@ pub struct ForwarderConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+/// Identifies which forwarder implementation should run.
 pub struct ForwarderType {
     #[serde(rename = "type")]
     pub forwarder_type: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+/// Network endpoints and socket settings.
 pub struct NetworkConfig {
     pub syslog_port: u16,
     pub wazuh_host: String,
@@ -42,12 +45,14 @@ pub struct NetworkConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+/// Log and state file locations.
 pub struct LoggingConfig {
     pub log_file: String,
     pub state_file: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+/// Queue, worker, and batching settings.
 pub struct PerformanceConfig {
     pub max_receiver_queue_size: usize,
     pub max_enrichment_queue_size: usize,
@@ -58,6 +63,7 @@ pub struct PerformanceConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+/// Threat-intelligence feed settings.
 pub struct ThreatIntelConfig {
     pub enable_threat_intel_feeds: bool,
     pub threat_intel_refresh_interval_secs: u64,
@@ -65,6 +71,7 @@ pub struct ThreatIntelConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+/// Behavioral anomaly detection settings.
 pub struct BehavioralConfig {
     pub enable_behavioral_analysis: bool,
     pub behavior_window_minutes: i64,
@@ -72,11 +79,13 @@ pub struct BehavioralConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
+/// Palo Alto-specific extension point for future settings.
 pub struct PaloAltoConfig {
     // Add Palo Alto-specific settings here if needed
 }
 
 #[derive(Debug, Error)]
+/// Errors produced while loading or validating configuration.
 pub enum ConfigError {
     #[error("failed to read config file {path}: {source}")]
     Read {
@@ -143,6 +152,7 @@ impl Default for ForwarderConfig {
 }
 
 impl ForwarderConfig {
+    /// Loads configuration from a TOML file.
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
         let path = path.as_ref();
         let display_path = path.display().to_string();
@@ -158,6 +168,7 @@ impl ForwarderConfig {
         Ok(config)
     }
 
+    /// Validates required runtime invariants.
     pub fn validate(&self) -> Result<(), ConfigError> {
         // Validate forwarder type
         match self.forwarder.forwarder_type.as_str() {
@@ -213,6 +224,7 @@ impl ForwarderConfig {
         Ok(())
     }
 
+    /// Returns true when the configured forwarder type is Palo Alto.
     pub fn is_palo_alto(&self) -> bool {
         self.forwarder.forwarder_type == "palo_alto"
     }

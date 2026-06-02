@@ -9,6 +9,7 @@ const STRING_POOL_MAX_SIZE: usize = 10_000;
 const INITIAL_STRING_CAPACITY: usize = 2_048;
 const MAX_REUSABLE_STRING_CAPACITY: usize = 4_096;
 
+/// Reuses bounded-size `String` allocations in hot parsing paths.
 pub struct StringPool {
     pool: Mutex<VecDeque<String>>,
     max_size: usize,
@@ -26,6 +27,7 @@ impl StringPool {
         }
     }
 
+    /// Returns a cleared string from the pool or allocates a new one.
     pub fn get_string(&self) -> String {
         let mut pool = self.pool.lock();
         if let Some(mut s) = pool.pop_front() {
@@ -46,6 +48,7 @@ impl StringPool {
         }
     }
 
+    /// Returns a string to the pool if its capacity is within the reusable limit.
     pub fn return_string(&self, mut s: String) {
         let mut pool = self.pool.lock();
         if pool.len() < self.max_size && s.capacity() <= MAX_REUSABLE_STRING_CAPACITY {
@@ -55,6 +58,7 @@ impl StringPool {
         }
     }
 
+    /// Returns `(allocated_count, reused_count)`.
     pub fn stats(&self) -> (usize, usize) {
         (
             self.allocated.load(Ordering::Relaxed),

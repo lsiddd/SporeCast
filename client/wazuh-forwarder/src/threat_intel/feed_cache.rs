@@ -48,6 +48,7 @@ fn is_cache_valid(filepath: &str) -> bool {
     false
 }
 
+#[tracing::instrument]
 pub(super) async fn download_feed(url: &str) -> Result<HashSet<String>> {
     let cache_filepath = get_cache_filepath(url);
     if is_cache_valid(&cache_filepath) {

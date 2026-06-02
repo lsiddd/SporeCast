@@ -7,6 +7,7 @@ use std::{
 };
 use tokio::{net::TcpStream, time::timeout};
 
+/// Small async TCP connection pool used by ELK senders.
 pub struct ConnectionPool {
     connections: Mutex<VecDeque<TcpStream>>,
     host: String,
@@ -16,6 +17,7 @@ pub struct ConnectionPool {
 }
 
 impl ConnectionPool {
+    /// Creates a pool for `host:port` with at most `max_size` idle connections.
     pub fn new(host: impl Into<String>, port: u16, max_size: usize) -> Self {
         Self {
             connections: Mutex::new(VecDeque::with_capacity(max_size)),
@@ -26,6 +28,7 @@ impl ConnectionPool {
         }
     }
 
+    /// Returns an idle connection or opens a new TCP connection.
     pub async fn get_connection(&self) -> Result<TcpStream, std::io::Error> {
         {
             let mut pool = self.connections.lock();
@@ -57,6 +60,7 @@ impl ConnectionPool {
         }
     }
 
+    /// Returns a usable connection to the idle pool.
     pub fn return_connection(&self, stream: TcpStream) {
         let mut pool = self.connections.lock();
         if pool.len() < self.max_size {
@@ -71,6 +75,7 @@ impl ConnectionPool {
         }
     }
 
+    /// Returns `(idle_connections, active_connections)`.
     pub fn stats(&self) -> (usize, usize) {
         let pool = self.connections.lock();
         (pool.len(), self.active_count.load(Ordering::Relaxed))

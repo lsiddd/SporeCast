@@ -28,6 +28,8 @@ pub use senders::{
 // ==============================================================================
 // --- Palo Alto Syslog Receiver Thread ---
 // ==============================================================================
+/// Receives Palo Alto syslog messages over UDP and enqueues raw log lines.
+#[tracing::instrument(skip(raw_log_tx, shutdown))]
 pub async fn palo_alto_syslog_receiver_thread(
     raw_log_tx: Sender<String>,
     shutdown: Arc<AtomicBool>,
@@ -94,6 +96,15 @@ pub async fn palo_alto_syslog_receiver_thread(
 // ==============================================================================
 // --- Palo Alto Enrichment Worker Thread ---
 // ==============================================================================
+/// Parses, enriches, and routes raw Palo Alto logs to ELK/Wazuh queues.
+#[tracing::instrument(skip(
+    raw_log_rx,
+    elk_tx,
+    wazuh_enriched_tx,
+    threat_intel,
+    state_merger_tx,
+    shutdown
+))]
 pub fn palo_alto_enrichment_worker_thread(
     worker_id: usize,
     raw_log_rx: Receiver<String>,
@@ -216,6 +227,8 @@ pub fn palo_alto_enrichment_worker_thread(
 // ==============================================================================
 // --- State Merger Thread ---
 // ==============================================================================
+/// Merges per-worker behavioral state and persists it periodically.
+#[tracing::instrument(skip(state_merger_rx, state_manager, shutdown))]
 pub fn state_merger_thread(
     state_merger_rx: Receiver<AlertHistory>,
     state_manager: Arc<Mutex<StateManager>>,

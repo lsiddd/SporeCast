@@ -17,6 +17,7 @@ mod feed_cache;
 use feed_cache::download_feed;
 
 #[derive(Clone)]
+/// In-memory threat intelligence indicators shared by enrichment workers.
 pub struct ThreatIntel {
     pub malicious_ips: Arc<HashMap<String, Vec<String>>>, // Stores malicious IPs and the list of feeds they appeared in.
     pub malicious_domains: Arc<HashSet<String>>,          // Stores unique malicious domains.
@@ -32,7 +33,7 @@ impl Default for ThreatIntel {
 }
 
 impl ThreatIntel {
-    // Constructor for ThreatIntel, also initializes hardcoded suspicious patterns.
+    /// Creates an empty threat intelligence database with a fresh update timestamp.
     pub fn new() -> Self {
         ThreatIntel {
             last_updated: Utc::now(),
@@ -43,7 +44,7 @@ impl ThreatIntel {
         }
     }
 
-    // Returns the total count of all loaded indicators.
+    /// Returns the total count of loaded indicators across all indicator types.
     pub fn indicator_count(&self) -> usize {
         self.malicious_ips.len()
             + self.malicious_domains.len()
@@ -52,7 +53,7 @@ impl ThreatIntel {
     }
 }
 
-// Checks if an IP address is a public IP (i.e., not private, loopback, etc.).
+/// Returns true when `ip_str` is a public IPv4 address.
 pub fn is_public_ip(ip_str: &str) -> bool {
     if let Ok(ip) = ip_str.parse::<Ipv4Addr>() {
         let is_public = !ip.is_private()
@@ -69,7 +70,19 @@ pub fn is_public_ip(ip_str: &str) -> bool {
     }
 }
 
-// This thread is responsible for periodically updating the threat intelligence databases.
+#[cfg(test)]
+mod tests {
+    use super::is_public_ip;
+
+    #[test]
+    fn public_ip_filter_rejects_private_and_accepts_public_ipv4() {
+        assert!(!is_public_ip("10.0.0.1"));
+        assert!(!is_public_ip("127.0.0.1"));
+        assert!(is_public_ip("8.8.8.8"));
+    }
+}
+
+/// Periodically refreshes the shared threat intelligence database until shutdown.
 pub async fn threat_intel_updater_thread(
     intel_db: Arc<Mutex<ThreatIntel>>,
     shutdown: Arc<AtomicBool>,

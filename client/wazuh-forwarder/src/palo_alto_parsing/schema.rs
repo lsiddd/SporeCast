@@ -117,6 +117,7 @@ pub const PALO_ALTO_HEADERS: &[&str] = &[
 ];
 
 pub const INTEGER_FIELDS: &[&str] = &[
+    "Log Number",
     "Config Version",
     "Session ID",
     "Repeat Count",
