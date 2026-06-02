@@ -1,64 +1,28 @@
+use crate::performance::STRING_POOL;
+use crate::unified_config::*;
 use anyhow::{anyhow, Result};
 use chrono::Utc;
-use log::{debug, info, warn};
-use serde_json::{json, Value};
-use std::{collections::HashMap, sync::Arc};
-use crate::performance::STRING_POOL;
-use crate::behavioral::AlertHistory;
-use crate::unified_config::*;
-use crate::threat_intel::ThreatIntel;
+use log::debug;
+use serde_json::Value;
+use std::collections::HashMap;
+
+mod enrichment;
+mod schema;
+pub use enrichment::{enrich_and_analyze_log, extract_iocs};
+use schema::{FLOAT_FIELDS, INTEGER_FIELDS, PALO_ALTO_HEADERS};
 
 // ==============================================================================
 // --- Palo Alto Log Parser ---
 // Parses Palo Alto PAN-OS CSV format logs into structured JSON objects.
 // ==============================================================================
 
-// Field headers for Palo Alto Traffic logs
-const PALO_ALTO_HEADERS: &[&str] = &[
-    "Log Number", "Receive Time", "Serial Number", "Type", "Threat/Content Type", "Config Version", "Generated Time",
-    "Source address", "Destination address", "NAT source IP", "NAT destination IP", "Rule Name",
-    "Source User", "Destination User", "Application", "Virtual System", "Source Zone", "Destination Zone",
-    "Inbound Interface", "Outbound Interface", "Log Action", "Time Logged", "Session ID", "Repeat Count",
-    "Source Port", "Destination Port", "NAT Source Port", "NAT Destination Port", "Flags", "IP Protocol",
-    "Action", "Bytes", "Bytes Sent", "Bytes Received", "Packets", "Start Time", "Elapsed Time in seconds",
-    "Category", "Padding", "Sequence Number", "Action Flags", "Source Location", "Destination Location",
-    "Padding-2", "Packets Sent", "Packets Received", "Session End Reason", "Device Group Hierarchy Level 1",
-    "Device Group Hierarchy Level 2", "Device Group Hierarchy Level 3", "Device Group Hierarchy Level 4",
-    "Virtual System Name", "Device Name", "Action Source", "Source VM UUID", "Destination VM UUID",
-    "Tunnel ID/IMSI", "Monitor Tag/IMEI", "Parent Session ID", "Parent Start Time", "Tunnel Type",
-    "SCTP Association ID", "SCTP Chunks", "SCTP Chunks Sent", "SCTP Chunks Received", "UUID for rule",
-    "HTTP/2 Connection", "Application-Level-Link-Changes", "Policy-ID", "Link-Switches", "SD-WAN-Cluster",
-    "SD-WAN-Device-Type", "SD-WAN-Cluster-Type", "SD-WAN-Site", "Dynamic-User-Group-Name",
-    "X-Forwarded-For-Address", "Source-Device-Category", "Source-Device-Profile", "Source-Device-Model",
-    "Source-Device-Vendor", "Source-Device-OS-Family", "Source-Device-OS-Version", "Source-Hostname",
-    "Source-MAC-Address", "Destination-Device-Category", "Destination-Device-Profile",
-    "Destination-Device-Model", "Destination-Device-Vendor", "Destination-Device-OS-Family",
-    "Destination-Device-OS-Version", "Destination-Hostname", "Destination-MAC-Address", "Container-ID",
-    "POD-Namespace", "POD-Name", "Source-External-Dynamic-List", "Destination-External-Dynamic-List",
-    "Host-ID", "User-Device-Serial-Number", "Source-Dynamic-Address-Group", "Destination-Dynamic-Address-Group",
-    "Session-Owner", "High-Resolution-Timestamp", "A-Slice-Service-Type", "A-Slice-Differentiator",
-    "Application-Subcategory", "Application-Category", "Application-Technology", "Application-Risk",
-    "Application-Characteristics", "Application-Container-Name", "Tunneled-Application", "is-SAAS-App",
-    "Application-Sanctioned-State", "Offloaded"
-];
-
-// Fields that should be parsed as integers
-const INTEGER_FIELDS: &[&str] = &[
-    "Config Version", "Session ID", "Repeat Count", "Source Port", "Destination Port", 
-    "NAT Source Port", "NAT Destination Port", "Bytes", "Bytes Sent", "Bytes Received", 
-    "Packets", "Elapsed Time in seconds", "Sequence Number", "Packets Sent", "Packets Received",
-    "Policy-ID", "Link-Switches", "Application-Risk"
-];
-
-// Fields that should be parsed as floats  
-const FLOAT_FIELDS: &[&str] = &["High-Resolution-Timestamp"];
 const PALO_ALTO_SYSLOG_PRIORITY: u16 = 134;
 
 pub fn parse_palo_alto_log_to_json(raw_log: &str) -> Result<Value> {
     debug!("Attempting to parse raw Palo Alto log: '{}'", raw_log);
-    
+
     let mut working_string = STRING_POOL.get_string();
-    
+
     // Extract the CSV part from the syslog message
     let csv_content = if let Some(device_start) = raw_log.find("PA-") {
         let device_section = &raw_log[device_start..];
@@ -84,7 +48,7 @@ pub fn parse_palo_alto_log_to_json(raw_log: &str) -> Result<Value> {
     } else {
         raw_log
     };
-    
+
     working_string.push_str(csv_content);
 
     debug!("Extracted CSV content: '{}'", csv_content);
@@ -101,7 +65,7 @@ pub fn parse_palo_alto_log_to_json(raw_log: &str) -> Result<Value> {
     };
 
     let mut json_map = HashMap::new();
-    
+
     // Map CSV fields to JSON using headers
     for (i, field) in record.iter().enumerate() {
         let Some(field_name) = PALO_ALTO_HEADERS.get(i) else {
@@ -122,31 +86,43 @@ pub fn parse_palo_alto_log_to_json(raw_log: &str) -> Result<Value> {
             }
         } else if FLOAT_FIELDS.contains(field_name) {
             match field_value.parse::<f64>() {
-                Ok(num) => Value::Number(serde_json::Number::from_f64(num).unwrap_or_else(|| 0.into())),
+                Ok(num) => {
+                    Value::Number(serde_json::Number::from_f64(num).unwrap_or_else(|| 0.into()))
+                }
                 Err(_) => Value::String(field_value.to_string()),
             }
         } else {
             Value::String(field_value.to_string())
         };
 
-        let normalized_name = field_name.replace(" ", "_")
+        let normalized_name = field_name
+            .replace(" ", "_")
             .replace("/", "_")
             .replace("-", "_")
             .to_lowercase();
-            
+
         json_map.insert(normalized_name, parsed_value);
     }
 
     // Add metadata
     // REMOVED: The following line was removed to prevent duplicating the entire log message in memory.
     // json_map.insert("palo_alto_raw_log".to_string(), Value::String(raw_log.to_string()));
-    json_map.insert("@timestamp".to_string(), Value::String(Utc::now().to_rfc3339()));
-    json_map.insert("log_source".to_string(), Value::String("palo_alto".to_string()));
+    json_map.insert(
+        "@timestamp".to_string(),
+        Value::String(Utc::now().to_rfc3339()),
+    );
+    json_map.insert(
+        "log_source".to_string(),
+        Value::String("palo_alto".to_string()),
+    );
 
-    debug!("Finished parsing Palo Alto log. Resulting JSON keys: {:?}", json_map.keys().collect::<Vec<_>>());
-    
+    debug!(
+        "Finished parsing Palo Alto log. Resulting JSON keys: {:?}",
+        json_map.keys().collect::<Vec<_>>()
+    );
+
     STRING_POOL.return_string(working_string);
-    
+
     Ok(Value::Object(json_map.into_iter().collect()))
 }
 
@@ -169,7 +145,8 @@ pub fn format_json_to_palo_alto_syslog(log_json: &Value) -> Result<String> {
             Value::Number(n) => n.to_string(),
             Value::Bool(b) => b.to_string(),
             Value::Array(arr) => {
-                let elements: Vec<String> = arr.iter()
+                let elements: Vec<String> = arr
+                    .iter()
                     .map(|elem| format_syslog_value(elem).replace("\"", ""))
                     .collect();
                 format!("\"{}\"", elements.join(","))
@@ -187,7 +164,10 @@ pub fn format_json_to_palo_alto_syslog(log_json: &Value) -> Result<String> {
             parts.push(format!("serial_number={}", format_syslog_value(serial)));
         }
         if let Some(generated_time) = obj.get("generated_time") {
-            parts.push(format!("generated_time={}", format_syslog_value(generated_time)));
+            parts.push(format!(
+                "generated_time={}",
+                format_syslog_value(generated_time)
+            ));
         }
         if let Some(src_addr) = obj.get("source_address") {
             parts.push(format!("src_ip={}", format_syslog_value(src_addr)));
@@ -209,14 +189,20 @@ pub fn format_json_to_palo_alto_syslog(log_json: &Value) -> Result<String> {
         }
 
         for (key, value) in obj {
-            if key.starts_with("@") || 
-               key == "palo_alto_raw_log" || 
-               key == "log_source" ||
-               key == "forwarder_enrichment" ||
-               key == "device_name" || key == "serial_number" || key == "generated_time" ||
-               key == "source_address" || key == "destination_address" ||
-               key == "source_port" || key == "destination_port" ||
-               key == "action" || key == "application" {
+            if key.starts_with("@")
+                || key == "palo_alto_raw_log"
+                || key == "log_source"
+                || key == "forwarder_enrichment"
+                || key == "device_name"
+                || key == "serial_number"
+                || key == "generated_time"
+                || key == "source_address"
+                || key == "destination_address"
+                || key == "source_port"
+                || key == "destination_port"
+                || key == "action"
+                || key == "application"
+            {
                 continue;
             }
 
@@ -237,253 +223,12 @@ pub fn format_json_to_palo_alto_syslog(log_json: &Value) -> Result<String> {
             }
         }
     } else {
-        return Err(anyhow!("Log JSON is not an object, cannot format to Palo Alto syslog."));
+        return Err(anyhow!(
+            "Log JSON is not an object, cannot format to Palo Alto syslog."
+        ));
     }
 
     let body = parts.join(" ");
-    
+
     Ok(format!("<{}>PaloAlto: {}", PALO_ALTO_SYSLOG_PRIORITY, body))
-}
-
-// ==============================================================================
-// --- Threat Hunting & Enrichment ---
-// Functions to extract Indicators of Compromise (IOCs) and enrich logs.
-// ==============================================================================
-
-// Extracts common IOCs (IPs, domains, hashes, URLs) from all string fields in a JSON log.
-pub fn extract_iocs(log_data: &Value) -> HashMap<&'static str, Vec<String>> {
-    debug!("Extracting IOCs from log data.");
-    let mut iocs = HashMap::new();
-
-    // Helper closure to collect matches from a string
-    let mut collect_matches = |s: &str| {
-        iocs.entry("ip")
-            .or_insert_with(Vec::new)
-            .extend(IP_REGEX.find_iter(s).map(|m| m.as_str().to_string()));
-        iocs.entry("domain")
-            .or_insert_with(Vec::new)
-            .extend(DOMAIN_REGEX.find_iter(s).map(|m| m.as_str().to_string()));
-        iocs.entry("hash")
-            .or_insert_with(Vec::new)
-            .extend(HASH_REGEX.find_iter(s).map(|m| m.as_str().to_string()));
-        iocs.entry("url")
-            .or_insert_with(Vec::new)
-            .extend(URL_REGEX.find_iter(s).map(|m| m.as_str().to_string()));
-    };
-
-    // Recursively traverse the JSON value to find all string fields.
-    let find_in_value_recursive_and_collect = |value: &Value, f: &mut dyn FnMut(&str)| {
-        fn inner(value: &Value, f: &mut dyn FnMut(&str)) {
-            match value {
-                Value::Object(map) => {
-                    for (_, val) in map {
-                        inner(val, f);
-                    }
-                }
-                Value::Array(arr) => {
-                    for val in arr {
-                        inner(val, f);
-                    }
-                }
-                Value::String(s) => {
-                    f(s);
-                }
-                _ => {} // Do nothing for other types (Number, Bool, Null).
-            }
-        }
-        inner(value, f);
-    };
-
-    find_in_value_recursive_and_collect(log_data, &mut collect_matches);
-    debug!("Extracted IOCs: {:?}", iocs);
-    iocs
-}
-
-// Main function for enriching and analyzing a single log.
-pub fn enrich_and_analyze_log(
-    mut log_data: Value,
-    intel: &Arc<ThreatIntel>,
-    state: &mut AlertHistory,
-) -> Value {
-    debug!("Starting enrichment and analysis for log.");
-    let iocs = extract_iocs(&log_data);
-    let mut enrichment_data = json!({});
-    let mut found_enrichment = false;
-
-    // --- 1. Threat Intelligence IOC Matching ---
-    let mut ioc_matches = json!({});
-    let mut found_ioc_match = false;
-
-    if let Some(ips) = iocs.get("ip") {
-        let mut malicious_ip_hits = Vec::new();
-        for ip in ips {
-            if let Some(sources) = intel.malicious_ips.get(ip) {
-                info!(
-                    "Threat Intel Match: Malicious IP '{}' detected from feeds: {:?}",
-                    ip, sources
-                );
-                malicious_ip_hits.push(json!({
-                    "ip": ip, "status": "blocklisted", "sources": sources, "source_count": sources.len()
-                }));
-            } else {
-                debug!("IP '{}' not found in malicious IP feeds.", ip);
-            }
-        }
-        if !malicious_ip_hits.is_empty() {
-            ioc_matches["malicious_ips"] = Value::Array(malicious_ip_hits);
-            found_ioc_match = true;
-        }
-    }
-
-    if let Some(domains) = iocs.get("domain") {
-        let hits: Vec<_> = domains
-            .iter()
-            .filter(|d| intel.malicious_domains.contains(*d))
-            .collect();
-        if !hits.is_empty() {
-            info!("Threat Intel Match: Malicious domain(s) detected: {:?}", hits);
-            ioc_matches["malicious_domains"] = json!(hits);
-            found_ioc_match = true;
-        }
-    }
-    if let Some(hashes) = iocs.get("hash") {
-        let hits: Vec<_> = hashes
-            .iter()
-            .filter(|h| intel.malicious_hashes.contains(*h))
-            .collect();
-        if !hits.is_empty() {
-            info!("Threat Intel Match: Malicious hash(es) detected: {:?}", hits);
-            ioc_matches["malicious_hashes"] = json!(hits);
-            found_ioc_match = true;
-        }
-    }
-    if let Some(urls) = iocs.get("url") {
-        let hits: Vec<_> = urls
-            .iter()
-            .filter(|u| intel.malicious_urls.contains(*u))
-            .collect();
-        if !hits.is_empty() {
-            info!("Threat Intel Match: Malicious URL(s) detected: {:?}", hits);
-            ioc_matches["malicious_urls"] = json!(hits);
-            found_ioc_match = true;
-        }
-    }
-
-    if found_ioc_match {
-        enrichment_data["ioc_matches"] = ioc_matches;
-        found_enrichment = true;
-    }
-
-    // --- 2. Other Threat Hunting Detections ---
-    let mut hunt_detections = json!({});
-    let mut found_hunt_detection = false;
-
-    let mut suspicious_patterns_found = Vec::new();
-    let check_suspicious_patterns =
-        |value: &Value, path: String, f: &mut dyn FnMut(&str, &str, &str)| {
-            fn inner(
-                value: &Value,
-                path: String,
-                compiled_patterns: &HashMap<String, regex::Regex>,
-                f: &mut dyn FnMut(&str, &str, &str),
-            ) {
-                match value {
-                    Value::Object(map) => {
-                        for (key, val) in map {
-                            let new_path = if path.is_empty() { key.clone() } else { format!("{}.{}", path, key) };
-                            inner(val, new_path, compiled_patterns, f);
-                        }
-                    }
-                    Value::Array(arr) => {
-                        for (index, val) in arr.iter().enumerate() {
-                            let new_path = format!("{}[{}]", path, index);
-                            inner(val, new_path, compiled_patterns, f);
-                        }
-                    }
-                    Value::String(s) => {
-                        for (name, re) in compiled_patterns {
-                            if re.is_match(s) {
-                                f(name, &path, s);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            inner(value, path, &SUSPICIOUS_PATTERNS_COMPILED, f);
-        };
-    let mut collect_suspicious = |name: &str, path: &str, s: &str| {
-        warn!("Threat Hunt: Suspicious pattern '{}' found in field '{}'.", name, path);
-        suspicious_patterns_found.push(json!({"pattern": name, "field_path": path, "sample": s.chars().take(100).collect::<String>()}));
-        found_hunt_detection = true;
-    };
-    check_suspicious_patterns(&log_data, String::new(), &mut collect_suspicious);
-
-    if !suspicious_patterns_found.is_empty() {
-        hunt_detections["suspicious_patterns"] = Value::Array(suspicious_patterns_found);
-        found_hunt_detection = true;
-    }
-
-    if let Some(cmd) = log_data.get("msg").or_else(|| log_data.get("eventdescription")).and_then(Value::as_str) {
-        let lower_cmd = cmd.to_lowercase();
-        for process in SUSPICIOUS_PROCESSES.iter() {
-            if lower_cmd.contains(process) {
-                warn!("Threat Hunt: Suspicious process keyword '{}' detected.", process);
-                hunt_detections["suspicious_process"] = json!(process);
-                found_hunt_detection = true;
-                break;
-            }
-        }
-    }
-    
-    if let Some(desc) = log_data.get("msg").or_else(|| log_data.get("logdesc")).and_then(Value::as_str) {
-        let lower_desc = desc.to_lowercase();
-        for asset in CRITICAL_ASSETS.iter() {
-            if lower_desc.contains(asset) {
-                warn!("Threat Hunt: Critical asset access keyword '{}' detected.", asset);
-                hunt_detections["critical_asset_access"] = json!(asset);
-                found_hunt_detection = true;
-                break;
-            }
-        }
-    }
-
-    if let Some(desc) = log_data.get("msg").or_else(|| log_data.get("logdesc")).and_then(Value::as_str) {
-        let mut matches = Vec::new();
-        for (name, re) in CORRELATION_RULES_COMPILED.iter() {
-            if re.is_match(desc) {
-                info!("Threat Hunt: Correlation rule '{}' matched.", name);
-                matches.push(json!({ "rule": name, "pattern": re.as_str() }));
-            }
-        }
-        if !matches.is_empty() {
-            hunt_detections["correlation_rules"] = Value::Array(matches);
-            found_hunt_detection = true;
-        }
-    }
-
-    if found_hunt_detection {
-        enrichment_data["threat_hunting"] = hunt_detections;
-        found_enrichment = true;
-    }
-
-    // --- 3. Behavioral Analysis ---
-    if ENABLE_BEHAVIORAL_ANALYSIS {
-        state.update(&log_data);
-        if let Some(anomalies) = state.is_suspicious_activity(&log_data) {
-            warn!("Behavioral anomalies detected: {:?}", anomalies);
-            enrichment_data["behavioral_anomalies"] = anomalies;
-            found_enrichment = true;
-        }
-    }
-
-    // Add all aggregated enrichment data to the original log data.
-    if found_enrichment {
-        if let Some(obj) = log_data.as_object_mut() {
-            enrichment_data["intel_last_updated"] = json!(intel.last_updated.to_rfc3339());
-            obj.insert("forwarder_enrichment".to_string(), enrichment_data);
-            info!("Log successfully enriched.");
-        }
-    }
-    log_data
 }

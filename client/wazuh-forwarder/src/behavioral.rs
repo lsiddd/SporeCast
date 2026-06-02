@@ -69,10 +69,7 @@ impl AlertHistory {
         {
             let count = self.src_ips.get_or_insert_mut(src_ip.to_string(), || 0);
             *count = count.saturating_add(1);
-            debug!(
-                "Updated src_ip history for {}: count = {}",
-                src_ip, *count
-            );
+            debug!("Updated src_ip history for {}: count = {}", src_ip, *count);
         }
         // Increment count for user.
         if let Some(user) = log_data.get("user").and_then(Value::as_str) {
@@ -143,8 +140,7 @@ impl AlertHistory {
                             "High frequency Log ID detected: {} has {} events in last {} minutes.",
                             logid, count, BEHAVIOR_WINDOW_MINUTES
                         );
-                        anomalies["high_frequency_logid"] =
-                            json!({ "count": count, "time_window_minutes": BEHAVIOR_WINDOW_MINUTES });
+                        anomalies["high_frequency_logid"] = json!({ "count": count, "time_window_minutes": BEHAVIOR_WINDOW_MINUTES });
                         found_anomaly = true;
                     }
                 }
@@ -241,9 +237,16 @@ impl StateManager {
         let serialized =
             serde_json::to_string(&self.state).context("Failed to serialize state to JSON")?;
         if let Some(parent) = Path::new(&self.state_file).parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create parent directory for state file: {:?}", parent))?;
-            debug!("Ensured parent directory for state file exists: {:?}", parent);
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "Failed to create parent directory for state file: {:?}",
+                    parent
+                )
+            })?;
+            debug!(
+                "Ensured parent directory for state file exists: {:?}",
+                parent
+            );
         }
         fs::write(&self.state_file, serialized)
             .with_context(|| format!("Failed to write state to file {}", self.state_file))?;

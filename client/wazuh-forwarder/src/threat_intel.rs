@@ -1,12 +1,8 @@
-use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
-use log::{debug, error, info, warn};
-use reqwest::Client;
+use log::{debug, error, info};
 use std::{
     collections::{HashMap, HashSet},
-    fs,
     net::Ipv4Addr,
-    path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -17,17 +13,16 @@ use tokio::task::JoinSet;
 
 use crate::unified_config::*;
 
-// ==============================================================================
-// --- Threat Intelligence Database Structure ---
-// This struct holds all loaded threat intelligence indicators.
-// ==============================================================================
+mod feed_cache;
+use feed_cache::download_feed;
+
 #[derive(Clone)]
 pub struct ThreatIntel {
     pub malicious_ips: Arc<HashMap<String, Vec<String>>>, // Stores malicious IPs and the list of feeds they appeared in.
-    pub malicious_domains: Arc<HashSet<String>>,           // Stores unique malicious domains.
-    pub malicious_hashes: Arc<HashSet<String>>,            // Stores unique malicious file hashes.
-    pub malicious_urls: Arc<HashSet<String>>,              // Stores unique malicious URLs.
-    pub last_updated: DateTime<Utc>,                       // Timestamp of the last successful update.
+    pub malicious_domains: Arc<HashSet<String>>,          // Stores unique malicious domains.
+    pub malicious_hashes: Arc<HashSet<String>>,           // Stores unique malicious file hashes.
+    pub malicious_urls: Arc<HashSet<String>>,             // Stores unique malicious URLs.
+    pub last_updated: DateTime<Utc>, // Timestamp of the last successful update.
 }
 
 impl Default for ThreatIntel {
@@ -57,138 +52,6 @@ impl ThreatIntel {
     }
 }
 
-// ==============================================================================
-// --- Threat Intelligence Feed Management ---
-// Functions for downloading, caching, and managing threat intelligence feeds.
-// ==============================================================================
-
-// Generates a unique filename for a cached feed based on its URL (using SHA256 hash).
-fn get_cache_filepath(url: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(url.as_bytes());
-    let result = hasher.finalize();
-    let filepath = format!("{}/{:x}.json", THREAT_INTEL_CACHE_DIR, result);
-    debug!("Generated cache filepath for URL '{}': {}", url, filepath);
-    filepath
-}
-
-// Checks if a cached feed file is still valid (not expired based on refresh interval).
-fn is_cache_valid(filepath: &str) -> bool {
-    debug!("Checking cache validity for: {}", filepath);
-    if let Ok(metadata) = fs::metadata(filepath) {
-        if let Ok(last_modified) = metadata.modified() {
-            let elapsed = last_modified.elapsed().unwrap_or(Duration::MAX);
-            let is_valid = elapsed < Duration::from_secs(THREAT_INTEL_REFRESH_INTERVAL_SECS);
-            if is_valid {
-                debug!(
-                    "Cache for {} is still valid ({}s old, expires in {}s).",
-                    filepath,
-                    elapsed.as_secs(),
-                    THREAT_INTEL_REFRESH_INTERVAL_SECS - elapsed.as_secs()
-                );
-            } else {
-                info!(
-                    "Cache for {} is expired ({}s old).",
-                    filepath,
-                    elapsed.as_secs()
-                );
-            }
-            return is_valid;
-        } else {
-            warn!(
-                "Could not get last modified time for cache file: {}",
-                filepath
-            );
-        }
-    } else {
-        info!("Cache file does not exist: {}", filepath);
-    }
-    false // Cache is not valid if file doesn't exist or modified time is unavailable/expired.
-}
-
-// Downloads a threat intelligence feed from a given URL and caches it.
-async fn download_feed(url: &str) -> Result<HashSet<String>> {
-    let cache_filepath = get_cache_filepath(url);
-    if is_cache_valid(&cache_filepath) {
-        info!("Using cached feed for {}.", url);
-        // The tokio::fs::File::open().await already yields a tokio::fs::File.
-        // We need to move this into spawn_blocking immediately to convert and read.
-        let local_cache_filepath = cache_filepath.clone(); // Clone for the closure
-        let items: HashSet<String> = tokio::task::spawn_blocking(move || {
-            let file = std::fs::File::open(&local_cache_filepath)
-                .with_context(|| format!("Failed to open cached feed file: {}", local_cache_filepath))?;
-            serde_json::from_reader(file).with_context(|| {
-                format!("Failed to parse cached feed from {}. It might be corrupted.", local_cache_filepath)
-            })
-        })
-        .await
-        .with_context(|| format!("Blocking task failed for reading cache: {}", cache_filepath))??; // Note the double '??' for nested Result
-
-        debug!("Loaded {} items from cache for {}.", items.len(), url);
-        return Ok(items);
-    }
-
-    info!("Downloading new feed from {}.", url);
-    let client = Client::new();
-    let response = client
-        .get(url)
-        .timeout(Duration::from_secs(30))
-        .send()
-        .await
-        .with_context(|| format!("Failed to send HTTP request to {}", url))?;
-    if !response.status().is_success() {
-        return Err(anyhow!("HTTP error {} for {}", response.status(), url));
-    }
-
-    let text = response
-        .text()
-        .await
-        .with_context(|| format!("Failed to get response body from {}", url))?;
-    let items: HashSet<String> = text
-        .lines()
-        .map(|line| line.trim())
-        .filter(|line| !line.starts_with(['#', ';', '/']) && !line.is_empty()) // Filter out comments and empty lines.
-        .map(|s| s.to_string())
-        .collect();
-
-    if let Some(parent) = Path::new(&cache_filepath).parent() {
-        tokio::fs::create_dir_all(parent).await.with_context(|| {
-            format!(
-                "Failed to create parent directory for cache file: {:?}",
-                parent
-            )
-        })?;
-        debug!(
-            "Ensured parent directory for cache file exists: {:?}",
-            parent
-        );
-    }
-
-    // Now, create the file and write to it within a blocking task.
-    let items_clone = items.clone(); // Clone items to move into the blocking task
-    let local_cache_filepath_clone = cache_filepath.clone(); // Clone for the closure
-    tokio::task::spawn_blocking(move || {
-        let file = std::fs::File::create(&local_cache_filepath_clone)
-            .with_context(|| format!("Failed to create cache file: {}", local_cache_filepath_clone))?;
-        serde_json::to_writer(file, &items_clone).with_context(|| {
-            format!(
-                "Failed to write feed data to cache file: {}",
-                local_cache_filepath_clone
-            )
-        })
-    })
-    .await
-    .with_context(|| format!("Blocking task failed for writing cache: {}", cache_filepath))??; // Double '??' for nested Result
-
-    info!(
-        "Successfully downloaded and cached {} items from {}.",
-        items.len(),
-        url
-    );
-    Ok(items)
-}
-
 // Checks if an IP address is a public IP (i.e., not private, loopback, etc.).
 pub fn is_public_ip(ip_str: &str) -> bool {
     if let Ok(ip) = ip_str.parse::<Ipv4Addr>() {
@@ -207,7 +70,10 @@ pub fn is_public_ip(ip_str: &str) -> bool {
 }
 
 // This thread is responsible for periodically updating the threat intelligence databases.
-pub async fn threat_intel_updater_thread(intel_db: Arc<Mutex<ThreatIntel>>, shutdown: Arc<AtomicBool>) {
+pub async fn threat_intel_updater_thread(
+    intel_db: Arc<Mutex<ThreatIntel>>,
+    shutdown: Arc<AtomicBool>,
+) {
     info!(
         "Threat intelligence updater task started. Will refresh every {} seconds.",
         THREAT_INTEL_REFRESH_INTERVAL_SECS
@@ -231,9 +97,7 @@ pub async fn threat_intel_updater_thread(intel_db: Arc<Mutex<ThreatIntel>>, shut
         info!("Fetching malicious IP feeds...");
         for url in IP_FEED_URLS.iter() {
             let url_str = url.to_string();
-            join_set.spawn(async move {
-                (url_str.clone(), download_feed(&url_str).await)
-            });
+            join_set.spawn(async move { (url_str.clone(), download_feed(&url_str).await) });
         }
 
         let mut all_ips: HashMap<String, Vec<String>> = HashMap::new();
@@ -264,27 +128,29 @@ pub async fn threat_intel_updater_thread(intel_db: Arc<Mutex<ThreatIntel>>, shut
 
         for url in URL_FEED_URLS.iter() {
             let url_str = url.to_string();
-            other_join_set.spawn(async move {
-                (url_str.clone(), download_feed(&url_str).await, "url")
-            });
+            other_join_set
+                .spawn(async move { (url_str.clone(), download_feed(&url_str).await, "url") });
         }
         for url in HASH_FEED_URLS.iter() {
             let url_str = url.to_string();
-            other_join_set.spawn(async move {
-                (url_str.clone(), download_feed(&url_str).await, "hash")
-            });
+            other_join_set
+                .spawn(async move { (url_str.clone(), download_feed(&url_str).await, "hash") });
         }
         for url in DOMAIN_FEED_URLS.iter() {
             let url_str = url.to_string();
-            other_join_set.spawn(async move {
-                (url_str.clone(), download_feed(&url_str).await, "domain")
-            });
+            other_join_set
+                .spawn(async move { (url_str.clone(), download_feed(&url_str).await, "domain") });
         }
 
         while let Some(res) = other_join_set.join_next().await {
             match res {
                 Ok((url, Ok(items), feed_type)) => {
-                    info!("Successfully downloaded {} {}s from {}.", items.len(), feed_type, url);
+                    info!(
+                        "Successfully downloaded {} {}s from {}.",
+                        items.len(),
+                        feed_type,
+                        url
+                    );
                     // Update new_intel directly, not the shared one until fully built.
                     let target_arc_ref = match feed_type {
                         "url" => &mut new_intel.malicious_urls,
@@ -300,7 +166,9 @@ pub async fn threat_intel_updater_thread(intel_db: Arc<Mutex<ThreatIntel>>, shut
                     current_map.extend(items);
                     *target_arc_ref = Arc::new(current_map);
                 }
-                Ok((url, Err(e), feed_type)) => error!("Failed to download {} feed {}: {}", feed_type, url, e),
+                Ok((url, Err(e), feed_type)) => {
+                    error!("Failed to download {} feed {}: {}", feed_type, url, e)
+                }
                 Err(e) => error!("Join error in other feed download: {}", e),
             }
         }
@@ -327,11 +195,17 @@ pub async fn threat_intel_updater_thread(intel_db: Arc<Mutex<ThreatIntel>>, shut
                 *intel = new_intel;
             }
             Err(e) => {
-                error!("Threat intelligence mutex poisoned; stopping updater: {}", e);
+                error!(
+                    "Threat intelligence mutex poisoned; stopping updater: {}",
+                    e
+                );
                 break;
             }
         }
-        info!("Threat intelligence databases updated. Total indicators loaded: {}.", total_indicators);
+        info!(
+            "Threat intelligence databases updated. Total indicators loaded: {}.",
+            total_indicators
+        );
 
         // Sleep until next refresh, but check shutdown flag every second.
         debug!(

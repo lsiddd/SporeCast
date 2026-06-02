@@ -2,14 +2,12 @@ use anyhow::{anyhow, Context, Result};
 use chrono::Local;
 use clap::Parser;
 use crossbeam_channel::bounded;
-use log::{error, info, warn, LevelFilter};
+use log::{error, info, warn};
 use signal_hook::{
     consts::{SIGINT, SIGTERM},
     iterator::Signals,
 };
 use std::{
-    fs::OpenOptions,
-    io,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -20,6 +18,7 @@ use std::{
 use wazuh_forwarder::{
     behavioral::StateManager,
     config_reader::ForwarderConfig,
+    logging::configure_logging,
     palo_alto_config::*,
     palo_alto_workers::*,
     threat_intel::{threat_intel_updater_thread, ThreatIntel},
@@ -63,38 +62,7 @@ async fn main() -> Result<()> {
     let max_enrichment_queue = config.performance.max_enrichment_queue_size;
     let max_wazuh_queue = config.performance.max_wazuh_queue_size;
 
-    // Logging Setup
-    let mut fern_dispatch = fern::Dispatch::new()
-        .format(|out, message, record| {
-            out.finish(format_args!(
-                "{} - {} - {} - {}",
-                Local::now().format("%Y-%m-%d %H:%M:%S"),
-                record.level(),
-                thread::current().name().unwrap_or("main"),
-                message
-            ))
-        })
-        .level(LevelFilter::Info)
-        .chain(io::stdout());
-
-    if NO_LOG_FILE {
-        fern_dispatch.apply()?;
-        info!("Logging configured for stdout only (log file writes disabled).");
-    } else {
-        let log_file_path = config.logging.log_file.as_str();
-        let log_file_result = OpenOptions::new().create(true).append(true).open(log_file_path);
-        match log_file_result {
-            Ok(file) => {
-                fern_dispatch = fern_dispatch.chain(file);
-                fern_dispatch.apply()?;
-                info!("Logging configured. Detailed logs will be written to {}.", log_file_path);
-            }
-            Err(e) => {
-                eprintln!("Failed to open log file {}: {}. Logging will only go to stdout.", log_file_path, e);
-                fern_dispatch.apply()?;
-            }
-        }
-    }
+    configure_logging(&config)?;
 
     info!("==============================================");
     info!("     Palo Alto Raw Log Forwarder (Rust)     ");
@@ -104,24 +72,40 @@ async fn main() -> Result<()> {
         Local::now().format("%Y-%m-%d %H:%M:%S %Z")
     );
     info!("Config loaded from: {}", cli.config);
-    info!("Configured to receive Palo Alto logs on UDP port: {}", syslog_port);
-    info!("Configured to forward enriched logs to Wazuh on {}:{}", wazuh_host, wazuh_port);
-    info!("Configured to forward processed logs to ELK server at: {}:{}", elk_host, elk_port);
+    info!(
+        "Configured to receive Palo Alto logs on UDP port: {}",
+        syslog_port
+    );
+    info!(
+        "Configured to forward enriched logs to Wazuh on {}:{}",
+        wazuh_host, wazuh_port
+    );
+    info!(
+        "Configured to forward processed logs to ELK server at: {}:{}",
+        elk_host, elk_port
+    );
 
     if let Err(e) = test_initial_connection(&elk_host, elk_port).await {
-        warn!("Initial ELK connection test failed. Service will attempt to reconnect as needed: {}", e);
+        warn!(
+            "Initial ELK connection test failed. Service will attempt to reconnect as needed: {}",
+            e
+        );
     }
 
     // Signal Handling
     let shutdown = Arc::new(AtomicBool::new(false));
-    let mut signals = Signals::new([SIGINT, SIGTERM]).context("Failed to register signal handlers")?;
+    let mut signals =
+        Signals::new([SIGINT, SIGTERM]).context("Failed to register signal handlers")?;
     let signal_shutdown = shutdown.clone();
     thread::Builder::new()
         .name("signal_handler".to_string())
         .spawn(move || {
             info!("Signal handler thread started. Waiting for SIGINT or SIGTERM.");
             if let Some(sig) = signals.forever().next() {
-                warn!("Received OS signal {:?}. Initiating graceful shutdown sequence...", sig);
+                warn!(
+                    "Received OS signal {:?}. Initiating graceful shutdown sequence...",
+                    sig
+                );
                 signal_shutdown.store(true, Ordering::Release);
             }
             info!("Signal handler thread finished.");
@@ -139,7 +123,10 @@ async fn main() -> Result<()> {
     // State Manager
     let mut state_manager_instance = StateManager::new(&state_file);
     if let Err(e) = state_manager_instance.load() {
-        error!("Failed to load previous state from {}: {}. Starting with fresh history.", state_file, e);
+        error!(
+            "Failed to load previous state from {}: {}. Starting with fresh history.",
+            state_file, e
+        );
     }
     let state_manager = Arc::new(Mutex::new(state_manager_instance));
 
@@ -181,8 +168,13 @@ async fn main() -> Result<()> {
             raw_log_tx_for_receiver,
             syslog_receiver_shutdown,
             syslog_port,
-        ).await {
-            error!("Palo Alto syslog receiver task encountered a critical error: {}", e);
+        )
+        .await
+        {
+            error!(
+                "Palo Alto syslog receiver task encountered a critical error: {}",
+                e
+            );
         }
     });
 
@@ -214,7 +206,10 @@ async fn main() -> Result<()> {
             })?;
         enrichment_handles.push(handle);
     }
-    info!("Spawned {} Palo Alto enrichment worker threads.", enrichment_worker_count);
+    info!(
+        "Spawned {} Palo Alto enrichment worker threads.",
+        enrichment_worker_count
+    );
 
     // Sender Tasks
     let elk_sender_handle = tokio::spawn(elk_sender_thread(

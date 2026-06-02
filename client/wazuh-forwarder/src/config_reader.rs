@@ -71,7 +71,6 @@ pub struct BehavioralConfig {
     pub high_severity_threshold: u32,
 }
 
-
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct PaloAltoConfig {
     // Add Palo Alto-specific settings here if needed
@@ -104,7 +103,9 @@ impl ConfigError {
 impl Default for ForwarderConfig {
     fn default() -> Self {
         Self {
-            forwarder: ForwarderType { forwarder_type: "palo_alto".to_string() },
+            forwarder: ForwarderType {
+                forwarder_type: "palo_alto".to_string(),
+            },
             network: NetworkConfig {
                 syslog_port: PALO_ALTO_SYSLOG_PORT,
                 wazuh_host: WAZUH_LOCAL_SYSLOG_HOST.to_string(),
@@ -160,7 +161,7 @@ impl ForwarderConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         // Validate forwarder type
         match self.forwarder.forwarder_type.as_str() {
-            "palo_alto" => {},
+            "palo_alto" => {}
             _ => {
                 return Err(ConfigError::validation(format!(
                     "invalid forwarder type: {}",
@@ -204,12 +205,13 @@ impl ForwarderConfig {
         }
 
         if self.performance.elk_batch_flush_interval_secs == 0 {
-            return Err(ConfigError::validation("ELK batch flush interval cannot be 0"));
+            return Err(ConfigError::validation(
+                "ELK batch flush interval cannot be 0",
+            ));
         }
 
         Ok(())
     }
-
 
     pub fn is_palo_alto(&self) -> bool {
         self.forwarder.forwarder_type == "palo_alto"

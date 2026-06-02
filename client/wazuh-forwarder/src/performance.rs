@@ -1,76 +1,21 @@
+use dashmap::DashMap;
+use log::{info, warn};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use std::{
-    collections::VecDeque,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
     time::{Duration, Instant},
 };
-use dashmap::DashMap;
-use log::{debug, info, warn};
-use tokio::time::timeout;
 
 use crate::unified_config::*;
 
-const STRING_POOL_MAX_SIZE: usize = 10_000;
-const INITIAL_STRING_CAPACITY: usize = 2_048;
-const MAX_REUSABLE_STRING_CAPACITY: usize = 4_096;
-
-// ==============================================================================
-// --- Memory Pool for String Reuse ---
-// Reduces allocation overhead for high-throughput log processing
-// ==============================================================================
-
-pub struct StringPool {
-    pool: Mutex<VecDeque<String>>,
-    max_size: usize,
-    allocated: AtomicUsize,
-    reused: AtomicUsize,
-}
-
-impl StringPool {
-    fn new(max_size: usize) -> Self {
-        Self {
-            pool: Mutex::new(VecDeque::with_capacity(max_size)),
-            max_size,
-            allocated: AtomicUsize::new(0),
-            reused: AtomicUsize::new(0),
-        }
-    }
-
-    pub fn get_string(&self) -> String {
-        let mut pool = self.pool.lock();
-        if let Some(mut s) = pool.pop_front() {
-            s.clear();
-            increment_saturating(&self.reused, Ordering::Relaxed);
-            debug!("Reused string from pool, reuse count: {}", self.reused.load(Ordering::Relaxed));
-            s
-        } else {
-            increment_saturating(&self.allocated, Ordering::Relaxed);
-            debug!("Allocated new string, allocation count: {}", self.allocated.load(Ordering::Relaxed));
-            String::with_capacity(INITIAL_STRING_CAPACITY)
-        }
-    }
-
-    pub fn return_string(&self, mut s: String) {
-        let mut pool = self.pool.lock();
-        if pool.len() < self.max_size && s.capacity() <= MAX_REUSABLE_STRING_CAPACITY {
-            s.clear();
-            pool.push_back(s);
-            debug!("Returned string to pool, pool size: {}", pool.len());
-        }
-        // If pool is full or string is too large, just drop it
-    }
-
-    pub fn stats(&self) -> (usize, usize) {
-        (self.allocated.load(Ordering::Relaxed), self.reused.load(Ordering::Relaxed))
-    }
-}
-
-// Global string pool instance
-pub static STRING_POOL: Lazy<StringPool> = Lazy::new(|| StringPool::new(STRING_POOL_MAX_SIZE));
+mod connection_pool;
+mod string_pool;
+pub use connection_pool::ConnectionPool;
+pub use string_pool::{StringPool, STRING_POOL};
 
 // ==============================================================================
 // --- Circuit Breaker Pattern ---
@@ -79,9 +24,9 @@ pub static STRING_POOL: Lazy<StringPool> = Lazy::new(|| StringPool::new(STRING_P
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum CircuitState {
-    Closed,    // Normal operation
-    Open,      // Failures detected, blocking calls
-    HalfOpen,  // Testing if service recovered
+    Closed,   // Normal operation
+    Open,     // Failures detected, blocking calls
+    HalfOpen, // Testing if service recovered
 }
 
 pub struct CircuitBreaker {
@@ -123,7 +68,10 @@ impl CircuitBreaker {
                     if last_time.elapsed() > Duration::from_secs(CIRCUIT_BREAKER_TIMEOUT_SECS) {
                         drop(last_failure);
                         self.transition_to_half_open();
-                        info!("Circuit breaker [{}] transitioning to HALF_OPEN after timeout", self.name);
+                        info!(
+                            "Circuit breaker [{}] transitioning to HALF_OPEN after timeout",
+                            self.name
+                        );
                         true
                     } else {
                         false
@@ -144,14 +92,17 @@ impl CircuitBreaker {
             && self.success_count.load(Ordering::Acquire) >= CIRCUIT_BREAKER_SUCCESS_THRESHOLD
         {
             self.transition_to_closed();
-            info!("Circuit breaker [{}] closed after {} successes", self.name, CIRCUIT_BREAKER_SUCCESS_THRESHOLD);
+            info!(
+                "Circuit breaker [{}] closed after {} successes",
+                self.name, CIRCUIT_BREAKER_SUCCESS_THRESHOLD
+            );
         }
     }
 
     pub fn record_failure(&self) {
         let failures = increment_saturating(&self.failure_count, Ordering::AcqRel);
         self.success_count.store(0, Ordering::Release);
-        
+
         {
             let mut last_failure = self.last_failure_time.lock();
             *last_failure = Some(Instant::now());
@@ -161,7 +112,10 @@ impl CircuitBreaker {
             match self.state() {
                 CircuitState::Closed | CircuitState::HalfOpen => {
                     self.transition_to_open();
-                    warn!("Circuit breaker [{}] OPENED after {} failures", self.name, failures);
+                    warn!(
+                        "Circuit breaker [{}] OPENED after {} failures",
+                        self.name, failures
+                    );
                 }
                 _ => {}
             }
@@ -212,36 +166,50 @@ impl QueueMonitor {
         }
     }
 
-    pub fn check_queue_health(&self, queue_len: usize, queue_capacity: usize, queue_name: &str) -> bool {
+    pub fn check_queue_health(
+        &self,
+        queue_len: usize,
+        queue_capacity: usize,
+        queue_name: &str,
+    ) -> bool {
         if queue_capacity == 0 {
-            warn!("Queue [{}] has zero capacity configured; treating as high load", queue_name);
+            warn!(
+                "Queue [{}] has zero capacity configured; treating as high load",
+                queue_name
+            );
             self.is_high_load.store(true, Ordering::Relaxed);
             return true;
         }
 
         let utilization = queue_len as f64 / queue_capacity as f64;
         let is_high = utilization >= HIGH_WORKLOAD_THRESHOLD;
-        
+
         // Update global high load state
         self.is_high_load.store(is_high, Ordering::Relaxed);
-        
+
         // Periodic reporting
         let mut last_report = self.last_report.lock();
         if last_report.elapsed() >= Duration::from_secs(QUEUE_MONITORING_INTERVAL_SECS) {
             if is_high {
                 warn!(
                     "Queue [{}] HIGH LOAD: {}/{} ({:.1}% capacity) - degradation mode active",
-                    queue_name, queue_len, queue_capacity, utilization * 100.0
+                    queue_name,
+                    queue_len,
+                    queue_capacity,
+                    utilization * 100.0
                 );
             } else {
                 info!(
                     "Queue [{}] status: {}/{} ({:.1}% capacity)",
-                    queue_name, queue_len, queue_capacity, utilization * 100.0
+                    queue_name,
+                    queue_len,
+                    queue_capacity,
+                    utilization * 100.0
                 );
             }
             *last_report = Instant::now();
         }
-        
+
         is_high
     }
 
@@ -259,76 +227,10 @@ impl Default for QueueMonitor {
 // Global queue monitor
 pub static QUEUE_MONITOR: Lazy<QueueMonitor> = Lazy::new(QueueMonitor::new);
 
-// ==============================================================================
-// --- Connection Pool ---
-// Manages multiple TCP connections for better throughput
-// ==============================================================================
-
-use tokio::net::TcpStream;
-// VecDeque already imported above
-
-pub struct ConnectionPool {
-    connections: Mutex<VecDeque<TcpStream>>,
-    host: String,
-    port: u16,
-    max_size: usize,
-    active_count: AtomicUsize,
-}
-
-impl ConnectionPool {
-    pub fn new(host: impl Into<String>, port: u16, max_size: usize) -> Self {
-        Self {
-            connections: Mutex::new(VecDeque::with_capacity(max_size)),
-            host: host.into(),
-            port,
-            max_size,
-            active_count: AtomicUsize::new(0),
-        }
-    }
-
-    pub async fn get_connection(&self) -> Result<TcpStream, std::io::Error> {
-        // Try to get existing connection from pool
-        {
-            let mut pool = self.connections.lock();
-            if let Some(stream) = pool.pop_front() {
-                debug!("Reused connection from pool, active: {}", self.active_count.load(Ordering::Relaxed));
-                return Ok(stream);
-            }
-        }
-
-        // Create new connection if pool is empty
-        let addr = format!("{}:{}", self.host, self.port);
-        match timeout(Duration::from_secs(5), TcpStream::connect(&addr)).await {
-            Ok(Ok(stream)) => {
-                self.active_count.fetch_add(1, Ordering::Relaxed);
-                debug!("Created new connection to {}, active: {}", addr, self.active_count.load(Ordering::Relaxed));
-                Ok(stream)
-            }
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "Connection timeout")),
-        }
-    }
-
-    pub fn return_connection(&self, stream: TcpStream) {
-        let mut pool = self.connections.lock();
-        if pool.len() < self.max_size {
-            pool.push_back(stream);
-            debug!("Returned connection to pool, pool size: {}", pool.len());
-        } else {
-            // Pool is full, connection will be dropped
-            self.active_count.fetch_sub(1, Ordering::Relaxed);
-            debug!("Dropped excess connection, active: {}", self.active_count.load(Ordering::Relaxed));
-        }
-    }
-
-    pub fn stats(&self) -> (usize, usize) {
-        let pool = self.connections.lock();
-        (pool.len(), self.active_count.load(Ordering::Relaxed))
-    }
-}
-
 fn increment_saturating(counter: &AtomicUsize, ordering: Ordering) -> usize {
-    match counter.fetch_update(ordering, Ordering::Acquire, |value| Some(value.saturating_add(1))) {
+    match counter.fetch_update(ordering, Ordering::Acquire, |value| {
+        Some(value.saturating_add(1))
+    }) {
         Ok(previous) | Err(previous) => previous.saturating_add(1),
     }
 }

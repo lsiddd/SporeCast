@@ -16,3 +16,4 @@ pub mod palo_alto_workers;
 
 // Configuration reader for TOML config files
 pub mod config_reader;
+pub mod logging;
