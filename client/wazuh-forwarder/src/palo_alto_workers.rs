@@ -17,22 +17,21 @@ use tokio::{
 };
 
 use crate::behavioral::{AlertHistory, StateManager};
-use crate::palo_alto_config::{ELK_HOST, ELK_PORT, PALO_ALTO_SYSLOG_PORT};
 use crate::unified_config::*;
 use crate::palo_alto_parsing::{enrich_and_analyze_log, format_json_to_palo_alto_syslog, parse_palo_alto_log_to_json};
 use crate::threat_intel::ThreatIntel;
-use crate::performance::{STRING_POOL, QUEUE_MONITOR, get_circuit_breaker, ConnectionPool};
+use crate::performance::{QUEUE_MONITOR, get_circuit_breaker, ConnectionPool};
 
 // ==============================================================================
 // --- Palo Alto Syslog Receiver Thread ---
 // ==============================================================================
 pub async fn palo_alto_syslog_receiver_thread(
     raw_log_tx: Sender<String>,
-    _wazuh_raw_tx: Sender<String>,
     shutdown: Arc<AtomicBool>,
+    syslog_port: u16,
 ) -> Result<()> {
-    let bind_addr = format!("0.0.0.0:{}", PALO_ALTO_SYSLOG_PORT);
-    info!("Starting Palo Alto syslog receiver on UDP port {}", PALO_ALTO_SYSLOG_PORT);
+    let bind_addr = format!("0.0.0.0:{}", syslog_port);
+    info!("Starting Palo Alto syslog receiver on UDP port {}", syslog_port);
 
     let socket = UdpSocket::bind(&bind_addr)
         .await
@@ -48,25 +47,20 @@ pub async fn palo_alto_syslog_receiver_thread(
                 let raw_message = String::from_utf8_lossy(&buffer[..size]);
                 debug!("Received Palo Alto log from {}: {}", addr, raw_message);
 
-                log_count += 1;
-                if log_count % 1000 == 0 {
+                log_count = log_count.saturating_add(1);
+                if log_count.is_multiple_of(1000) {
                     info!("Processed {} Palo Alto logs so far", log_count);
                 }
 
                 QUEUE_MONITOR.check_queue_health(
-                    raw_log_tx.len(), 
-                    MAX_RECEIVER_QUEUE_SIZE, 
+                    raw_log_tx.len(),
+                    MAX_RECEIVER_QUEUE_SIZE,
                     "raw_log_queue"
                 );
-                
-                let mut log_string = STRING_POOL.get_string();
-                log_string.push_str(&raw_message);
-                
-                if let Err(e) = raw_log_tx.try_send(log_string.clone()) {
+
+                if let Err(e) = raw_log_tx.try_send(raw_message.into_owned()) {
                     warn!("Failed to send raw log to enrichment queue: {}. Queue may be full.", e);
                 }
-                
-                STRING_POOL.return_string(log_string);
             }
             Ok(Err(e)) => {
                 error!("UDP receive error: {}. Will retry.", e);
@@ -78,7 +72,7 @@ pub async fn palo_alto_syslog_receiver_thread(
         }
     }
 
-    info!("Palo Alto syslog receiver thread shutting down. Total logs processed: {}", log_count);
+    info!("Palo Alto syslog receiver shutting down. Total logs processed: {}", log_count);
     Ok(())
 }
 
@@ -103,7 +97,7 @@ pub fn palo_alto_enrichment_worker_thread(
     while !shutdown.load(Ordering::Relaxed) {
         match raw_log_rx.recv_timeout(Duration::from_secs(1)) {
             Ok(raw_log) => {
-                processed_count += 1;
+                processed_count = processed_count.saturating_add(1);
                 debug!("[Worker {}] Processing raw log #{}: {}", worker_id, processed_count, raw_log);
 
                 match parse_palo_alto_log_to_json(&raw_log) {
@@ -113,13 +107,16 @@ pub fn palo_alto_enrichment_worker_thread(
                         let should_skip_behavioral = DISABLE_BEHAVIORAL_UNDER_HIGH_LOAD && QUEUE_MONITOR.is_high_load();
                         
                         if !should_skip_behavioral {
-                            let intel_guard = threat_intel.lock().unwrap();
-                            let intel_arc = Arc::new(intel_guard.clone());
-                            drop(intel_guard);
+                            let intel_arc = {
+                                let intel_guard = threat_intel
+                                    .lock()
+                                    .map_err(|_| anyhow!("threat intelligence mutex poisoned"))?;
+                                Arc::new(intel_guard.clone())
+                            };
                             parsed_log = enrich_and_analyze_log(parsed_log, &intel_arc, &mut worker_state);
 
                             if parsed_log.get("forwarder_enrichment").is_some() {
-                                enriched_count += 1;
+                                enriched_count = enriched_count.saturating_add(1);
                                 debug!("[Worker {}] Log enriched with threat intelligence and behavioral analysis", worker_id);
 
                                 // Only forward to Wazuh if threat intel indicators were found
@@ -150,7 +147,7 @@ pub fn palo_alto_enrichment_worker_thread(
                     }
                 }
 
-                if processed_count % 100 == 0 {
+                if processed_count.is_multiple_of(100) {
                     if let Err(e) = state_merger_tx.try_send(worker_state.clone()) {
                         debug!("[Worker {}] Failed to send state update: {}", worker_id, e);
                     }
@@ -181,19 +178,20 @@ pub fn palo_alto_enrichment_worker_thread(
 pub async fn elk_sender_thread(
     elk_rx: Receiver<Value>,
     shutdown: Arc<AtomicBool>,
+    elk_host: String,
+    elk_port: u16,
+    batch_size: usize,
+    flush_interval_secs: u64,
 ) -> Result<()> {
     info!("Logstash sender task started with connection pooling and batching.");
-    
-    let connection_pool = Arc::new(ConnectionPool::new(
-        ELK_HOST.to_string(), 
-        ELK_PORT, 
-        CONNECTION_POOL_SIZE
-    ));
+
+    let connection_pool = Arc::new(ConnectionPool::new(elk_host, elk_port, CONNECTION_POOL_SIZE));
     let circuit_breaker = get_circuit_breaker("elk_sender");
-    
-    let mut retry_delay = 5;
-    let mut batch_buffer: Vec<Value> = Vec::with_capacity(ELK_BATCH_SIZE);
+
+    let mut retry_delay = 5u64;
+    let mut batch_buffer: Vec<Value> = Vec::with_capacity(batch_size);
     let mut last_batch_flush = std::time::Instant::now();
+    let flush_interval = Duration::from_secs(flush_interval_secs);
 
     while !shutdown.load(Ordering::Relaxed) || !elk_rx.is_empty() {
         if !circuit_breaker.can_execute() {
@@ -206,42 +204,36 @@ pub async fn elk_sender_thread(
         let recv_result = task::spawn_blocking(move || {
             elk_rx_clone.recv_timeout(Duration::from_secs(1))
         }).await?;
-        
+
         match recv_result {
             Ok(log_json) => {
                 batch_buffer.push(log_json);
-                
-                if batch_buffer.len() >= ELK_BATCH_SIZE || 
-                   last_batch_flush.elapsed() >= Duration::from_secs(ELK_BATCH_FLUSH_INTERVAL_SECS) {
-                    
+
+                if batch_buffer.len() >= batch_size || last_batch_flush.elapsed() >= flush_interval {
                     if let Err(e) = flush_batch_to_elk(&batch_buffer, &connection_pool, &circuit_breaker).await {
                         error!("Failed to flush batch to ELK: {}", e);
                         circuit_breaker.record_failure();
-                        retry_delay = std::cmp::min(retry_delay * 2, 60);
+                        retry_delay = retry_delay.saturating_mul(2).min(60);
                     } else {
                         circuit_breaker.record_success();
                         retry_delay = 5;
                     }
-                    
                     batch_buffer.clear();
                     last_batch_flush = std::time::Instant::now();
                 }
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                if !batch_buffer.is_empty() && 
-                   last_batch_flush.elapsed() >= Duration::from_secs(ELK_BATCH_FLUSH_INTERVAL_SECS) {
-                    
+                if !batch_buffer.is_empty() && last_batch_flush.elapsed() >= flush_interval {
                     if let Err(e) = flush_batch_to_elk(&batch_buffer, &connection_pool, &circuit_breaker).await {
                         error!("Failed to flush partial batch to ELK: {}", e);
                         circuit_breaker.record_failure();
                     } else {
                         circuit_breaker.record_success();
                     }
-                    
                     batch_buffer.clear();
                     last_batch_flush = std::time::Instant::now();
                 }
-                
+
                 if shutdown.load(Ordering::Relaxed) {
                     break;
                 }
@@ -266,13 +258,16 @@ pub async fn elk_sender_thread(
 // ==============================================================================
 // --- Wazuh Syslog Sender Threads ---
 // ==============================================================================
+#[allow(dead_code)]
 pub async fn wazuh_raw_syslog_sender_thread(
     wazuh_raw_rx: Receiver<String>,
     shutdown: Arc<AtomicBool>,
+    wazuh_host: String,
+    wazuh_port: u16,
 ) -> Result<()> {
     info!("Starting Wazuh raw syslog sender thread with circuit breaker");
 
-    let wazuh_addr = format!("{}:{}", WAZUH_LOCAL_SYSLOG_HOST, WAZUH_LOCAL_SYSLOG_PORT);
+    let wazuh_addr = format!("{}:{}", wazuh_host, wazuh_port);
     let socket = UdpSocket::bind("0.0.0.0:0").await
         .context("Failed to create UDP socket for Wazuh raw sender")?;
 
@@ -296,16 +291,16 @@ pub async fn wazuh_raw_syslog_sender_thread(
             Ok(raw_log) => {
                 match timeout(Duration::from_secs(5), socket.send_to(raw_log.as_bytes(), &wazuh_addr)).await {
                     Ok(Ok(_)) => {
-                        sent_count += 1;
+                        sent_count = sent_count.saturating_add(1);
                         circuit_breaker.record_success();
                     }
                     Ok(Err(e)) => {
-                        failed_count += 1;
+                        failed_count = failed_count.saturating_add(1);
                         circuit_breaker.record_failure();
                         warn!("Failed to send raw log to Wazuh: {}. Total failed: {}", e, failed_count);
                     }
                     Err(_) => {
-                        failed_count += 1;
+                        failed_count = failed_count.saturating_add(1);
                         circuit_breaker.record_failure();
                         warn!("Failed to send raw log to Wazuh: timeout. Total failed: {}", failed_count);
                     }
@@ -326,10 +321,12 @@ pub async fn wazuh_raw_syslog_sender_thread(
 pub async fn wazuh_enriched_syslog_sender_thread(
     wazuh_enriched_rx: Receiver<String>,
     shutdown: Arc<AtomicBool>,
+    wazuh_host: String,
+    wazuh_port: u16,
 ) -> Result<()> {
     info!("Starting Wazuh enriched syslog sender thread with circuit breaker");
 
-    let wazuh_addr = format!("{}:{}", WAZUH_LOCAL_SYSLOG_HOST, WAZUH_LOCAL_SYSLOG_PORT);
+    let wazuh_addr = format!("{}:{}", wazuh_host, wazuh_port);
     let socket = UdpSocket::bind("0.0.0.0:0").await
         .context("Failed to create UDP socket for Wazuh enriched sender")?;
 
@@ -353,19 +350,19 @@ pub async fn wazuh_enriched_syslog_sender_thread(
             Ok(enriched_log) => {
                 match timeout(Duration::from_secs(5), socket.send_to(enriched_log.as_bytes(), &wazuh_addr)).await {
                     Ok(Ok(_)) => {
-                        sent_count += 1;
+                        sent_count = sent_count.saturating_add(1);
                         circuit_breaker.record_success();
-                        if sent_count % 100 == 0 {
+                        if sent_count.is_multiple_of(100) {
                             info!("Sent {} enriched logs to Wazuh", sent_count);
                         }
                     }
                     Ok(Err(e)) => {
-                        failed_count += 1;
+                        failed_count = failed_count.saturating_add(1);
                         circuit_breaker.record_failure();
                         warn!("Failed to send enriched log to Wazuh: {}. Total failed: {}", e, failed_count);
                     }
                     Err(_) => {
-                        failed_count += 1;
+                        failed_count = failed_count.saturating_add(1);
                         circuit_breaker.record_failure();
                         warn!("Failed to send enriched log to Wazuh: timeout. Total failed: {}", failed_count);
                     }
@@ -399,10 +396,12 @@ pub fn state_merger_thread(
     while !shutdown.load(Ordering::Relaxed) {
         match state_merger_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(worker_state) => {
-                updates_processed += 1;
+                updates_processed = updates_processed.saturating_add(1);
                 debug!("Merging state update #{}", updates_processed);
 
-                let mut manager = state_manager.lock().unwrap();
+                let mut manager = state_manager
+                    .lock()
+                    .map_err(|_| anyhow!("state manager mutex poisoned"))?;
                 manager._merge_worker_state(&worker_state);
 
                 if last_save.elapsed().as_secs() >= 10 {
@@ -422,7 +421,9 @@ pub fn state_merger_thread(
         }
     }
 
-    let manager = state_manager.lock().unwrap();
+    let manager = state_manager
+        .lock()
+        .map_err(|_| anyhow!("state manager mutex poisoned"))?;
     if let Err(e) = manager.save() {
         error!("Failed to save final state to disk: {}", e);
     } else {
@@ -437,14 +438,10 @@ pub fn state_merger_thread(
 // ==============================================================================
 // --- Connection Testing (REWRITTEN) ---
 // ==============================================================================
-pub async fn test_initial_connection() -> Result<()> {
-    info!("Testing initial connection to Logstash TCP input at {}:{}", ELK_HOST, ELK_PORT);
+pub async fn test_initial_connection(elk_host: &str, elk_port: u16) -> Result<()> {
+    info!("Testing initial connection to Logstash TCP input at {}:{}", elk_host, elk_port);
 
-    let connection_pool = ConnectionPool::new(
-        ELK_HOST.to_string(), 
-        ELK_PORT, 
-        1
-    );
+    let connection_pool = ConnectionPool::new(elk_host.to_string(), elk_port, 1);
 
     match connection_pool.get_connection().await {
         Ok(_) => {
@@ -472,7 +469,7 @@ async fn flush_batch_to_elk(
     let mut stream = pool.get_connection().await
         .context("Failed to get connection from pool")?;
     
-    let mut payload = String::with_capacity(batch.len() * 512);
+    let mut payload = String::with_capacity(batch.len().saturating_mul(512));
     for log_json in batch {
         match serde_json::to_string(log_json) {
             Ok(json_str) => {

@@ -73,7 +73,7 @@ pub static STRING_POOL: Lazy<StringPool> = Lazy::new(|| StringPool::new(10000));
 // Prevents cascading failures when downstream services are unavailable
 // ==============================================================================
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum CircuitState {
     Closed,    // Normal operation
     Open,      // Failures detected, blocking calls
@@ -136,14 +136,11 @@ impl CircuitBreaker {
         self.success_count.fetch_add(1, Ordering::Release);
         self.failure_count.store(0, Ordering::Release);
 
-        match current_state {
-            CircuitState::HalfOpen => {
-                if self.success_count.load(Ordering::Acquire) >= CIRCUIT_BREAKER_SUCCESS_THRESHOLD {
-                    self.transition_to_closed();
-                    info!("Circuit breaker [{}] closed after {} successes", self.name, CIRCUIT_BREAKER_SUCCESS_THRESHOLD);
-                }
-            }
-            _ => {}
+        if current_state == CircuitState::HalfOpen
+            && self.success_count.load(Ordering::Acquire) >= CIRCUIT_BREAKER_SUCCESS_THRESHOLD
+        {
+            self.transition_to_closed();
+            info!("Circuit breaker [{}] closed after {} successes", self.name, CIRCUIT_BREAKER_SUCCESS_THRESHOLD);
         }
     }
 
@@ -212,6 +209,12 @@ impl QueueMonitor {
     }
 
     pub fn check_queue_health(&self, queue_len: usize, queue_capacity: usize, queue_name: &str) -> bool {
+        if queue_capacity == 0 {
+            warn!("Queue [{}] has zero capacity configured; treating as high load", queue_name);
+            self.is_high_load.store(true, Ordering::Relaxed);
+            return true;
+        }
+
         let utilization = queue_len as f64 / queue_capacity as f64;
         let is_high = utilization >= HIGH_WORKLOAD_THRESHOLD;
         
@@ -240,6 +243,12 @@ impl QueueMonitor {
 
     pub fn is_high_load(&self) -> bool {
         self.is_high_load.load(Ordering::Relaxed)
+    }
+}
+
+impl Default for QueueMonitor {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

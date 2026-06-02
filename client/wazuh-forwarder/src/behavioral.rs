@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::HashMap, fs, num::NonZeroUsize, path::Path};
+use std::{fs, num::NonZeroUsize, path::Path};
 
 use crate::unified_config::*;
 use lru::LruCache; // ADDED: Import LruCache
@@ -13,10 +13,13 @@ use lru::LruCache; // ADDED: Import LruCache
 // This struct tracks historical log data for anomaly detection.
 // ==============================================================================
 
-// ADDED: Define fixed cache sizes to prevent unbounded memory growth.
-// Adjust these values based on your available memory and expected unique IPs/users.
 const MAX_UNIQUE_IPS_TO_TRACK: usize = 250_000;
 const MAX_UNIQUE_USERS_TO_TRACK: usize = 100_000;
+const MAX_RULES_TO_TRACK: usize = 10_000;
+
+fn cache_capacity(value: usize) -> NonZeroUsize {
+    NonZeroUsize::new(value).unwrap_or(NonZeroUsize::MIN)
+}
 
 // MODIFIED: Replaced unbounded HashMaps with size-limited LruCache.
 // This is the primary fix for the OOM killer issue.
@@ -24,19 +27,18 @@ const MAX_UNIQUE_USERS_TO_TRACK: usize = 100_000;
 // State saving/loading for this struct is disabled for now to fix the memory leak.
 #[derive(Clone, Debug)]
 pub struct AlertHistory {
-    pub src_ips: LruCache<String, u32>, // MODIFIED: Was HashMap
-    pub users: LruCache<String, u32>,   // MODIFIED: Was HashMap
-    pub rules: HashMap<u32, u32>,      // Counts of log rule IDs within the behavior window.
-    pub last_alert_time: DateTime<Utc>, // Timestamp of the last processed log. Used to reset the window.
+    pub src_ips: LruCache<String, u32>,
+    pub users: LruCache<String, u32>,
+    pub rules: LruCache<u32, u32>,
+    pub last_alert_time: DateTime<Utc>,
 }
 
 impl Default for AlertHistory {
-    // MODIFIED: Provides a default, empty state for AlertHistory using LruCache.
     fn default() -> Self {
         Self {
-            src_ips: LruCache::new(NonZeroUsize::new(MAX_UNIQUE_IPS_TO_TRACK).unwrap()),
-            users: LruCache::new(NonZeroUsize::new(MAX_UNIQUE_USERS_TO_TRACK).unwrap()),
-            rules: HashMap::new(),
+            src_ips: LruCache::new(cache_capacity(MAX_UNIQUE_IPS_TO_TRACK)),
+            users: LruCache::new(cache_capacity(MAX_UNIQUE_USERS_TO_TRACK)),
+            rules: LruCache::new(cache_capacity(MAX_RULES_TO_TRACK)),
             last_alert_time: Utc::now(),
         }
     }
@@ -66,7 +68,7 @@ impl AlertHistory {
             .and_then(Value::as_str)
         {
             let count = self.src_ips.get_or_insert_mut(src_ip.to_string(), || 0);
-            *count += 1;
+            *count = count.saturating_add(1);
             debug!(
                 "Updated src_ip history for {}: count = {}",
                 src_ip, *count
@@ -75,17 +77,19 @@ impl AlertHistory {
         // Increment count for user.
         if let Some(user) = log_data.get("user").and_then(Value::as_str) {
             let count = self.users.get_or_insert_mut(user.to_string(), || 0);
-            *count += 1;
+            *count = count.saturating_add(1);
             debug!("Updated user history for {}: count = {}", user, *count);
         }
         // Increment count for log rule ID.
         if let Some(logid) = log_data.get("logid").and_then(Value::as_u64) {
-            *self.rules.entry(logid as u32).or_insert(0) += 1;
-            debug!(
-                "Updated logid history for {}: count = {}",
-                logid,
-                self.rules[&(logid as u32)]
-            );
+            match u32::try_from(logid) {
+                Ok(rule_id) => {
+                    let count = self.rules.get_or_insert_mut(rule_id, || 0);
+                    *count = count.saturating_add(1);
+                    debug!("Updated logid history for {}: count = {}", logid, *count);
+                }
+                Err(_) => warn!("Skipping logid {} because it exceeds u32::MAX", logid),
+            }
         }
     }
 
@@ -130,17 +134,19 @@ impl AlertHistory {
                 }
             }
         }
-        // Check for specific log ID flooding. (HashMap.get is fine with &self)
+        // Check for specific log ID flooding.
         if let Some(logid) = log_data.get("logid").and_then(Value::as_u64) {
-            if let Some(&count) = self.rules.get(&(logid as u32)) {
-                if count > HIGH_SEVERITY_THRESHOLD {
-                    warn!(
-                        "High frequency Log ID detected: {} has {} events in last {} minutes.",
-                        logid, count, BEHAVIOR_WINDOW_MINUTES
-                    );
-                    anomalies["high_frequency_logid"] =
-                        json!({ "count": count, "time_window_minutes": BEHAVIOR_WINDOW_MINUTES });
-                    found_anomaly = true;
+            if let Ok(rule_id) = u32::try_from(logid) {
+                if let Some(&count) = self.rules.peek(&rule_id) {
+                    if count > HIGH_SEVERITY_THRESHOLD {
+                        warn!(
+                            "High frequency Log ID detected: {} has {} events in last {} minutes.",
+                            logid, count, BEHAVIOR_WINDOW_MINUTES
+                        );
+                        anomalies["high_frequency_logid"] =
+                            json!({ "count": count, "time_window_minutes": BEHAVIOR_WINDOW_MINUTES });
+                        found_anomaly = true;
+                    }
                 }
             }
         }
@@ -165,14 +171,15 @@ impl AlertHistory {
         // Merge by iterating and putting, respecting the LRU limit
         for (ip, count) in other.src_ips {
             let entry = self.src_ips.get_or_insert_mut(ip, || 0);
-            *entry += count;
+            *entry = entry.saturating_add(count);
         }
         for (user, count) in other.users {
             let entry = self.users.get_or_insert_mut(user, || 0);
-            *entry += count;
+            *entry = entry.saturating_add(count);
         }
         for (rule, count) in other.rules {
-            *self.rules.entry(rule).or_insert(0) += count;
+            let entry = self.rules.get_or_insert_mut(rule, || 0);
+            *entry = entry.saturating_add(count);
         }
     }
 }
@@ -247,5 +254,22 @@ impl StateManager {
     pub fn _merge_worker_state(&mut self, worker_state: &AlertHistory) {
         debug!("Merging worker state into main state manager");
         self.state.alert_history.merge(worker_state.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oversized_logid_is_ignored_in_behavioral_counters() {
+        let mut history = AlertHistory::default();
+        let log = json!({ "logid": u64::from(u32::MAX) + 1 });
+
+        for _ in 0..=HIGH_SEVERITY_THRESHOLD {
+            history.update(&log);
+        }
+
+        assert!(history.is_suspicious_activity(&log).is_none());
     }
 }

@@ -143,7 +143,7 @@ async fn download_feed(url: &str) -> Result<HashSet<String>> {
     let items: HashSet<String> = text
         .lines()
         .map(|line| line.trim())
-        .filter(|line| !line.starts_with(&['#', ';', '/']) && !line.is_empty()) // Filter out comments and empty lines.
+        .filter(|line| !line.starts_with(['#', ';', '/']) && !line.is_empty()) // Filter out comments and empty lines.
         .map(|s| s.to_string())
         .collect();
 
@@ -288,7 +288,10 @@ pub async fn threat_intel_updater_thread(intel_db: Arc<Mutex<ThreatIntel>>, shut
                         "url" => &mut new_intel.malicious_urls,
                         "hash" => &mut new_intel.malicious_hashes,
                         "domain" => &mut new_intel.malicious_domains,
-                        _ => unreachable!(), // Should not happen with current logic
+                        other => {
+                            error!("Unexpected threat intelligence feed type: {}", other);
+                            continue;
+                        }
                     };
                     // Replace the Arc with a new one that contains the extended items
                     let mut current_map = (**target_arc_ref).clone(); // Clone the inner map/set
@@ -317,11 +320,15 @@ pub async fn threat_intel_updater_thread(intel_db: Arc<Mutex<ThreatIntel>>, shut
 
         // Acquire a lock on the shared threat intelligence database and update it.
         info!("Acquiring lock on shared threat intelligence database for update.");
-        *intel_db.lock().unwrap() = new_intel; // This will replace the old Arc'd data with new Arc'd data.
-        info!(
-            "Threat intelligence databases updated. Total indicators: {}",
-            total_indicators
-        );
+        match intel_db.lock() {
+            Ok(mut intel) => {
+                *intel = new_intel;
+            }
+            Err(e) => {
+                error!("Threat intelligence mutex poisoned; stopping updater: {}", e);
+                break;
+            }
+        }
         info!("Threat intelligence databases updated. Total indicators loaded: {}.", total_indicators);
 
         // Sleep until next refresh, but check shutdown flag every second.
