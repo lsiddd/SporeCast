@@ -1,15 +1,12 @@
 use crate::domain::rules::CSV_TIMESTAMP_PATTERN;
-use crate::infrastructure::performance::STRING_POOL;
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use log::debug;
 use serde_json::Value;
 use std::collections::HashMap;
 
-mod enrichment;
 mod schema;
-pub use enrichment::{enrich_and_analyze_log, extract_iocs};
-use schema::{FLOAT_FIELDS, INTEGER_FIELDS, PALO_ALTO_HEADERS};
+use schema::{COMMON_HEADERS, FLOAT_FIELDS, INTEGER_FIELDS, THREAT_EXTRA_HEADERS, TRAFFIC_EXTRA_HEADERS};
 
 // ==============================================================================
 // --- Palo Alto Log Parser ---
@@ -22,7 +19,7 @@ const PALO_ALTO_SYSLOG_PRIORITY: u16 = 134;
 pub fn parse_palo_alto_log_to_json(raw_log: &str) -> Result<Value> {
     debug!("Attempting to parse raw Palo Alto log: '{}'", raw_log);
 
-    let mut working_string = STRING_POOL.get_string();
+    let mut working_string = String::new();
 
     // Extract the CSV part from the syslog message
     let csv_content = if let Some(device_start) = raw_log.find("PA-") {
@@ -65,13 +62,27 @@ pub fn parse_palo_alto_log_to_json(raw_log: &str) -> Result<Value> {
         None => return Err(anyhow!("No CSV records found in log")),
     };
 
+    // Detect log type from field 3 to pick the correct extra-field schema.
+    let log_type = record.get(3).map(|s| s.trim()).unwrap_or("");
+    let extra_headers: &[&str] = match log_type {
+        "THREAT" => THREAT_EXTRA_HEADERS,
+        _ => TRAFFIC_EXTRA_HEADERS, // TRAFFIC, SYSTEM, CONFIG, etc.
+    };
+
     let mut json_map = HashMap::new();
 
-    // Map CSV fields to JSON using headers
     for (i, field) in record.iter().enumerate() {
-        let Some(field_name) = PALO_ALTO_HEADERS.get(i) else {
-            debug!("Unknown field at position {}: {}", i, field);
-            continue;
+        let field_name: &str = if i < COMMON_HEADERS.len() {
+            COMMON_HEADERS[i]
+        } else {
+            let extra_i = i - COMMON_HEADERS.len();
+            match extra_headers.get(extra_i) {
+                Some(name) => name,
+                None => {
+                    debug!("Unknown field at position {}: {}", i, field);
+                    continue;
+                }
+            }
         };
 
         let field_value = field.trim();
@@ -79,13 +90,12 @@ pub fn parse_palo_alto_log_to_json(raw_log: &str) -> Result<Value> {
             continue;
         }
 
-        // Parse based on field type
-        let parsed_value = if INTEGER_FIELDS.contains(field_name) {
+        let parsed_value = if INTEGER_FIELDS.contains(&field_name) {
             match field_value.parse::<i64>() {
                 Ok(num) => Value::Number(num.into()),
                 Err(_) => Value::String(field_value.to_string()),
             }
-        } else if FLOAT_FIELDS.contains(field_name) {
+        } else if FLOAT_FIELDS.contains(&field_name) {
             match field_value.parse::<f64>() {
                 Ok(num) => {
                     Value::Number(serde_json::Number::from_f64(num).unwrap_or_else(|| 0.into()))
@@ -97,9 +107,9 @@ pub fn parse_palo_alto_log_to_json(raw_log: &str) -> Result<Value> {
         };
 
         let normalized_name = field_name
-            .replace(" ", "_")
-            .replace("/", "_")
-            .replace("-", "_")
+            .replace(' ', "_")
+            .replace('/', "_")
+            .replace('-', "_")
             .to_lowercase();
 
         json_map.insert(normalized_name, parsed_value);
@@ -121,8 +131,6 @@ pub fn parse_palo_alto_log_to_json(raw_log: &str) -> Result<Value> {
         "Finished parsing Palo Alto log. Resulting JSON keys: {:?}",
         json_map.keys().collect::<Vec<_>>()
     );
-
-    STRING_POOL.return_string(working_string);
 
     Ok(Value::Object(json_map.into_iter().collect()))
 }
@@ -240,6 +248,12 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // Realistic TRAFFIC log line from palo_alto_pan_os_sample_firewall_realistic_v2.log
+    const TRAFFIC_LOG: &str = "<14>Jun 02 13:10:01 PA-VM-01 1,2026/06/02 13:10:01,007951000123,TRAFFIC,end,2561,2026/06/02 13:10:01,10.10.10.25,198.51.100.14,192.0.2.25,198.51.100.14,allow-web,,,ssl,vsys1,trust,untrust,ethernet1/2,ethernet1/1,LFP-SIEM,2026/06/02 13:10:01,4839201,1,54321,443,39321,443,0x400019,tcp,allow,48233,21132,27101,64,2026/06/02 13:09:57,3,any,,7408146363088945002,0x0,10.0.0.0-10.255.255.255,United States,,32,32,tcp-fin,0,0,0,0,,PA-VM-01,from-policy";
+
+    // Realistic THREAT log line (SQL injection)
+    const THREAT_LOG: &str = "<14>Jun 02 13:10:13 PA-VM-01 1,2026/06/02 13:10:13,007951000123,THREAT,vulnerability,2561,2026/06/02 13:10:13,10.10.30.15,203.0.113.77,0.0.0.0,0.0.0.0,allow-dmz-web,,,web-browsing,vsys1,dmz,untrust,ethernet1/4,ethernet1/1,LFP-SIEM,2026/06/02 13:10:13,4839203,1,49822,80,0,0,0x400019,tcp,reset-both,/search.php?id=1%27%20OR%201=1,HTTP SQL Injection Attempt(40001),any,high,client-to-server,7408146363088945004";
+
     #[test]
     fn parses_palo_alto_csv_fields_to_normalized_json() {
         let raw =
@@ -251,6 +265,42 @@ mod tests {
         assert_eq!(parsed["source_address"], "10.0.0.1");
         assert_eq!(parsed["destination_address"], "8.8.8.8");
         assert_eq!(parsed["log_source"], "palo_alto");
+    }
+
+    #[test]
+    fn parses_realistic_traffic_log_with_syslog_prefix() {
+        let parsed = parse_palo_alto_log_to_json(TRAFFIC_LOG).expect("TRAFFIC log should parse");
+
+        assert_eq!(parsed["type"], "TRAFFIC");
+        assert_eq!(parsed["source_address"], "10.10.10.25");
+        assert_eq!(parsed["destination_address"], "198.51.100.14");
+        assert_eq!(parsed["action"], "allow");
+        assert_eq!(parsed["application"], "ssl");
+        assert_eq!(parsed["serial_number"], "007951000123");
+        assert_eq!(parsed["log_source"], "palo_alto");
+        assert!(parsed.get("@timestamp").is_some());
+    }
+
+    #[test]
+    fn parses_realistic_threat_log_fields() {
+        let parsed = parse_palo_alto_log_to_json(THREAT_LOG).expect("THREAT log should parse");
+
+        assert_eq!(parsed["type"], "THREAT");
+        assert_eq!(parsed["source_address"], "10.10.30.15");
+        assert_eq!(parsed["destination_address"], "203.0.113.77");
+        assert_eq!(parsed["ip_protocol"], "tcp");
+        assert_eq!(parsed["source_port"], 49822);
+        assert_eq!(parsed["destination_port"], 80);
+    }
+
+    #[test]
+    fn traffic_log_integer_fields_parsed_as_numbers() {
+        let parsed = parse_palo_alto_log_to_json(TRAFFIC_LOG).expect("should parse");
+
+        assert!(parsed["source_port"].is_number());
+        assert!(parsed["destination_port"].is_number());
+        assert_eq!(parsed["destination_port"], 443);
+        assert_eq!(parsed["source_port"], 54321);
     }
 
     #[test]
@@ -269,5 +319,16 @@ mod tests {
         assert!(formatted.contains("device_name=pa-01"));
         assert!(formatted.contains("src_ip=10.0.0.1"));
         assert!(formatted.contains("dst_ip=8.8.8.8"));
+    }
+
+    #[test]
+    fn full_round_trip_parse_then_format() {
+        let parsed = parse_palo_alto_log_to_json(TRAFFIC_LOG).expect("should parse");
+        let formatted = format_json_to_palo_alto_syslog(&parsed).expect("should format");
+
+        assert!(formatted.starts_with("<134>PaloAlto:"));
+        assert!(formatted.contains("src_ip=10.10.10.25"));
+        assert!(formatted.contains("dst_ip=198.51.100.14"));
+        assert!(formatted.contains("action=allow"));
     }
 }

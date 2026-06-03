@@ -4,6 +4,7 @@
 //! architecture is migrated incrementally.
 
 pub mod behavioral;
+pub mod enrichment;
 pub mod indicators;
 pub mod palo_alto;
 pub mod ports;

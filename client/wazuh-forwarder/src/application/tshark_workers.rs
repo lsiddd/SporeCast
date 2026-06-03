@@ -2,17 +2,18 @@ use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
 use log::{debug, error, info, warn};
 use serde_json::Value;
+use parking_lot::Mutex;
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     time::Duration,
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::domain::{behavioral::AlertHistory, indicators::ThreatIntel};
-use crate::domain::{palo_alto::enrich_and_analyze_log, tshark::normalize_packet};
+use crate::domain::{enrichment::enrich_and_analyze_log, tshark::normalize_packet};
 use crate::infrastructure::defaults::{
     DISABLE_BEHAVIORAL_UNDER_HIGH_LOAD, MAX_RECEIVER_QUEUE_SIZE,
 };
@@ -133,13 +134,8 @@ pub fn tshark_enrichment_worker_thread(
                     DISABLE_BEHAVIORAL_UNDER_HIGH_LOAD && QUEUE_MONITOR.is_high_load();
 
                 let enriched = if !should_skip_behavioral {
-                    let intel_arc = {
-                        let guard = threat_intel
-                            .lock()
-                            .map_err(|_| anyhow::anyhow!("threat intel mutex poisoned"))?;
-                        Arc::new(guard.clone())
-                    };
-                    enrich_and_analyze_log(packet, &intel_arc, &mut worker_state, geoip.as_deref())
+                    let intel_arc = Arc::new(threat_intel.lock().clone());
+                    enrich_and_analyze_log(packet, &intel_arc, &mut worker_state, geoip.as_deref().map(|g| g as &dyn crate::domain::ports::GeoIpLookup))
                 } else {
                     packet
                 };
@@ -164,8 +160,9 @@ pub fn tshark_enrichment_worker_thread(
                     );
                 }
             }
-            Err(_) => {
-                if parsed_rx.is_empty() && shutdown.load(Ordering::Relaxed) {
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                if shutdown.load(Ordering::Relaxed) {
                     break;
                 }
             }

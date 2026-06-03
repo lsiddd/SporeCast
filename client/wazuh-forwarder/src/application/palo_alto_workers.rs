@@ -1,20 +1,20 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender};
 use log::{debug, error, info, warn};
 use serde_json::Value;
+use parking_lot::Mutex;
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     time::{Duration, Instant},
 };
 use tokio::{net::UdpSocket, time::timeout};
 
 use crate::application::state::StateManager;
-use crate::domain::palo_alto::{
-    enrich_and_analyze_log, format_json_to_palo_alto_syslog, parse_palo_alto_log_to_json,
-};
+use crate::domain::enrichment::enrich_and_analyze_log;
+use crate::domain::palo_alto::{format_json_to_palo_alto_syslog, parse_palo_alto_log_to_json};
 use crate::domain::{behavioral::AlertHistory, indicators::ThreatIntel};
 use crate::infrastructure::defaults::{
     DISABLE_BEHAVIORAL_UNDER_HIGH_LOAD, MAX_RECEIVER_QUEUE_SIZE,
@@ -22,10 +22,6 @@ use crate::infrastructure::defaults::{
 use crate::infrastructure::geoip::GeoIpEnricher;
 use crate::infrastructure::performance::QUEUE_MONITOR;
 
-pub use crate::infrastructure::senders::{
-    elk_sender_thread, test_initial_connection, wazuh_enriched_syslog_sender_thread,
-    wazuh_raw_syslog_sender_thread,
-};
 
 // ==============================================================================
 // --- Palo Alto Syslog Receiver Thread ---
@@ -144,17 +140,12 @@ pub fn palo_alto_enrichment_worker_thread(
                             DISABLE_BEHAVIORAL_UNDER_HIGH_LOAD && QUEUE_MONITOR.is_high_load();
 
                         if !should_skip_behavioral {
-                            let intel_arc = {
-                                let intel_guard = threat_intel
-                                    .lock()
-                                    .map_err(|_| anyhow!("threat intelligence mutex poisoned"))?;
-                                Arc::new(intel_guard.clone())
-                            };
+                            let intel_arc = Arc::new(threat_intel.lock().clone());
                             parsed_log = enrich_and_analyze_log(
                                 parsed_log,
                                 &intel_arc,
                                 &mut worker_state,
-                                geoip.as_deref(),
+                                geoip.as_deref().map(|g| g as &dyn crate::domain::ports::GeoIpLookup),
                             );
 
                             if parsed_log.get("forwarder_enrichment").is_some() {
@@ -206,12 +197,9 @@ pub fn palo_alto_enrichment_worker_thread(
                     );
                 }
             }
-            Err(_) => {
-                debug!(
-                    "[Worker {}] Receive timeout or channel closed, checking shutdown",
-                    worker_id
-                );
-                if raw_log_rx.is_empty() && shutdown.load(Ordering::Relaxed) {
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                if shutdown.load(Ordering::Relaxed) {
                     break;
                 }
             }
@@ -253,10 +241,8 @@ pub fn state_merger_thread(
                 updates_processed = updates_processed.saturating_add(1);
                 debug!("Merging state update #{}", updates_processed);
 
-                let mut manager = state_manager
-                    .lock()
-                    .map_err(|_| anyhow!("state manager mutex poisoned"))?;
-                manager._merge_worker_state(&worker_state);
+                let mut manager = state_manager.lock();
+                manager.merge_worker_state(&worker_state);
 
                 if last_save.elapsed().as_secs() >= 10 {
                     if let Err(e) = manager.save() {
@@ -267,17 +253,16 @@ pub fn state_merger_thread(
                     last_save = Instant::now();
                 }
             }
-            Err(_) => {
-                if state_merger_rx.is_empty() && shutdown.load(Ordering::Relaxed) {
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                if shutdown.load(Ordering::Relaxed) {
                     break;
                 }
             }
         }
     }
 
-    let manager = state_manager
-        .lock()
-        .map_err(|_| anyhow!("state manager mutex poisoned"))?;
+    let manager = state_manager.lock();
     if let Err(e) = manager.save() {
         error!("Failed to save final state to disk: {}", e);
     } else {
