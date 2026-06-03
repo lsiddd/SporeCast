@@ -15,7 +15,7 @@ use crate::infrastructure::defaults::CONNECTION_POOL_SIZE;
 use crate::infrastructure::performance::{get_circuit_breaker, CircuitBreaker, ConnectionPool};
 
 mod wazuh;
-pub use wazuh::{wazuh_enriched_syslog_sender_thread, wazuh_raw_syslog_sender_thread};
+pub use wazuh::wazuh_enriched_syslog_sender_thread;
 
 const ELK_BATCH_ITEM_CAPACITY_ESTIMATE: usize = 512;
 

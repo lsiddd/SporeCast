@@ -160,8 +160,8 @@ pub fn get_circuit_breaker(name: &str) -> Arc<CircuitBreaker> {
 
 /// Tracks queue utilization and exposes a global high-load signal.
 pub struct QueueMonitor {
-    pub is_high_load: AtomicBool,
-    pub last_report: Mutex<Instant>,
+    is_high_load: AtomicBool,
+    last_report: Mutex<Instant>,
 }
 
 impl QueueMonitor {
@@ -233,7 +233,7 @@ impl Default for QueueMonitor {
 // Global queue monitor
 pub static QUEUE_MONITOR: Lazy<QueueMonitor> = Lazy::new(QueueMonitor::new);
 
-fn increment_saturating(counter: &AtomicUsize, ordering: Ordering) -> usize {
+pub(super) fn increment_saturating(counter: &AtomicUsize, ordering: Ordering) -> usize {
     match counter.fetch_update(ordering, Ordering::Acquire, |value| {
         Some(value.saturating_add(1))
     }) {

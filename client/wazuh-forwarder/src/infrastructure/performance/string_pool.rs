@@ -32,14 +32,14 @@ impl StringPool {
         let mut pool = self.pool.lock();
         if let Some(mut s) = pool.pop_front() {
             s.clear();
-            increment_saturating(&self.reused, Ordering::Relaxed);
+            super::increment_saturating(&self.reused, Ordering::Relaxed);
             debug!(
                 "Reused string from pool, reuse count: {}",
                 self.reused.load(Ordering::Relaxed)
             );
             s
         } else {
-            increment_saturating(&self.allocated, Ordering::Relaxed);
+            super::increment_saturating(&self.allocated, Ordering::Relaxed);
             debug!(
                 "Allocated new string, allocation count: {}",
                 self.allocated.load(Ordering::Relaxed)
@@ -70,10 +70,3 @@ impl StringPool {
 pub static STRING_POOL: once_cell::sync::Lazy<StringPool> =
     once_cell::sync::Lazy::new(|| StringPool::new(STRING_POOL_MAX_SIZE));
 
-fn increment_saturating(counter: &AtomicUsize, ordering: Ordering) -> usize {
-    match counter.fetch_update(ordering, Ordering::Acquire, |value| {
-        Some(value.saturating_add(1))
-    }) {
-        Ok(previous) | Err(previous) => previous.saturating_add(1),
-    }
-}

@@ -2,11 +2,12 @@
 
 use chrono::Utc;
 use log::{debug, error, info};
+use parking_lot::Mutex;
 use std::{
     collections::HashMap,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     time::Duration,
 };
@@ -20,15 +21,16 @@ use crate::infrastructure::defaults::{
 use crate::infrastructure::threat_feeds::download_feed;
 
 /// Periodically refreshes the shared threat intelligence database until shutdown.
+/// Sets `intel_ready` to true after the first load cycle completes.
 pub async fn threat_intel_updater_thread(
     intel_db: Arc<Mutex<ThreatIntel>>,
     shutdown: Arc<AtomicBool>,
+    intel_ready: Arc<AtomicBool>,
 ) {
     info!(
         "Threat intelligence updater task started. Will refresh every {} seconds.",
         THREAT_INTEL_REFRESH_INTERVAL_SECS
     );
-    tokio::time::sleep(Duration::from_secs(5)).await;
 
     loop {
         if shutdown.load(Ordering::Relaxed) {
@@ -133,18 +135,8 @@ pub async fn threat_intel_updater_thread(
         let total_indicators = new_intel.indicator_count();
 
         info!("Acquiring lock on shared threat intelligence database for update.");
-        match intel_db.lock() {
-            Ok(mut intel) => {
-                *intel = new_intel;
-            }
-            Err(e) => {
-                error!(
-                    "Threat intelligence mutex poisoned; stopping updater: {}",
-                    e
-                );
-                break;
-            }
-        }
+        *intel_db.lock() = new_intel;
+        intel_ready.store(true, Ordering::Release);
         info!(
             "Threat intelligence databases updated. Total indicators loaded: {}.",
             total_indicators

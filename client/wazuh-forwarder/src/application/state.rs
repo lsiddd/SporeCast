@@ -17,7 +17,7 @@ pub struct State {
 
 pub struct StateManager {
     state_file: String,
-    pub state: State,
+    pub(crate) state: State,
 }
 
 impl StateManager {
@@ -72,7 +72,7 @@ impl StateManager {
         Ok(())
     }
 
-    pub fn _merge_worker_state(&mut self, worker_state: &AlertHistory) {
+    pub(crate) fn merge_worker_state(&mut self, worker_state: &AlertHistory) {
         debug!("Merging worker state into main state manager");
         self.state.alert_history.merge(worker_state.clone());
     }

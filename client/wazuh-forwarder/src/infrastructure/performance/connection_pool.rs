@@ -44,7 +44,7 @@ impl ConnectionPool {
         let addr = format!("{}:{}", self.host, self.port);
         match timeout(Duration::from_secs(5), TcpStream::connect(&addr)).await {
             Ok(Ok(stream)) => {
-                increment_saturating(&self.active_count, Ordering::Relaxed);
+                super::increment_saturating(&self.active_count, Ordering::Relaxed);
                 debug!(
                     "Created new connection to {}, active: {}",
                     addr,
@@ -79,14 +79,6 @@ impl ConnectionPool {
     pub fn stats(&self) -> (usize, usize) {
         let pool = self.connections.lock();
         (pool.len(), self.active_count.load(Ordering::Relaxed))
-    }
-}
-
-fn increment_saturating(counter: &AtomicUsize, ordering: Ordering) -> usize {
-    match counter.fetch_update(ordering, Ordering::Acquire, |value| {
-        Some(value.saturating_add(1))
-    }) {
-        Ok(previous) | Err(previous) => previous.saturating_add(1),
     }
 }
 
