@@ -1,7 +1,17 @@
 use super::*;
 use crate::domain::behavioral::AlertHistory;
 use crate::domain::palo_alto::parse_palo_alto_log_to_json;
+use crate::domain::ports::GeoIpLookup;
 use crate::domain::tshark::normalize_packet;
+use proptest::prelude::*;
+
+struct StubGeoIp;
+
+impl GeoIpLookup for StubGeoIp {
+    fn lookup(&self, ip_str: &str) -> Option<Value> {
+        Some(json!({ "looked_up": ip_str }))
+    }
+}
 
 #[test]
 fn extracts_iocs_from_nested_json_strings() {
@@ -18,7 +28,39 @@ fn extracts_iocs_from_nested_json_strings() {
 }
 
 #[test]
-fn adds_enrichment_when_ioc_matches_threat_intel() {
+fn duplicate_iocs_across_raw_and_normalized_fields_are_reported_once() {
+    let log = json!({
+        "source_address": "198.51.100.99",
+        "ip": {
+            "ip_ip_src": "198.51.100.99"
+        }
+    });
+
+    let iocs = extract_iocs(&log);
+
+    assert_eq!(iocs["ip"], vec!["198.51.100.99".to_string()]);
+}
+
+#[test]
+fn geoip_enrichment_only_looks_up_public_addresses() {
+    let intel = Arc::new(ThreatIntel::new());
+    let mut state = AlertHistory::default();
+    let geoip = StubGeoIp;
+    let log = json!({
+        "source_address": "10.0.0.1",
+        "destination_address": "8.8.8.8"
+    });
+
+    let enriched = enrich_and_analyze_log(log, &intel, &mut state, Some(&geoip));
+
+    assert_eq!(
+        enriched["forwarder_enrichment"]["geoip"],
+        json!({ "dst": { "looked_up": "8.8.8.8" } })
+    );
+}
+
+#[test]
+fn malicious_domain_match_adds_exact_ioc_enrichment() {
     let mut intel = ThreatIntel::new();
     intel.malicious_domains = Arc::new(["malicious.example".to_string()].into_iter().collect());
     let intel = Arc::new(intel);
@@ -27,7 +69,10 @@ fn adds_enrichment_when_ioc_matches_threat_intel() {
 
     let enriched = enrich_and_analyze_log(log, &intel, &mut state, None);
 
-    assert!(enriched.get("forwarder_enrichment").is_some());
+    assert_eq!(
+        enriched["forwarder_enrichment"]["ioc_matches"]["malicious_domains"],
+        json!(["malicious.example"])
+    );
 }
 
 #[test]
@@ -46,9 +91,21 @@ fn palo_alto_log_enriched_with_malicious_ip() {
 
     let enriched = enrich_and_analyze_log(parsed, &intel, &mut state, None);
 
-    let enrichment = enriched.get("forwarder_enrichment").expect("should have enrichment");
-    let ioc_matches = enrichment.get("ioc_matches").expect("should have ioc_matches");
-    assert!(ioc_matches.get("malicious_ips").is_some());
+    let enrichment = enriched
+        .get("forwarder_enrichment")
+        .expect("should have enrichment");
+    let ioc_matches = enrichment
+        .get("ioc_matches")
+        .expect("should have ioc_matches");
+    assert_eq!(
+        ioc_matches["malicious_ips"],
+        json!([{
+            "ip": "203.0.113.10",
+            "status": "blocklisted",
+            "sources": ["test-feed"],
+            "source_count": 1
+        }])
+    );
 }
 
 #[test]
@@ -78,16 +135,31 @@ fn tshark_packet_normalized_then_enriched_end_to_end() {
 
     let mut intel = ThreatIntel::new();
     let mut malicious_ips = std::collections::HashMap::new();
-    malicious_ips.insert("198.51.100.99".to_string(), vec!["test-blocklist".to_string()]);
+    malicious_ips.insert(
+        "198.51.100.99".to_string(),
+        vec!["test-blocklist".to_string()],
+    );
     intel.malicious_ips = Arc::new(malicious_ips);
     let intel = Arc::new(intel);
     let mut state = AlertHistory::default();
 
     let enriched = enrich_and_analyze_log(normalized, &intel, &mut state, None);
 
-    let enrichment = enriched.get("forwarder_enrichment").expect("tshark packet should be enriched");
-    let ioc = enrichment.get("ioc_matches").expect("should have ioc_matches");
-    assert!(ioc.get("malicious_ips").is_some());
+    let enrichment = enriched
+        .get("forwarder_enrichment")
+        .expect("tshark packet should be enriched");
+    let ioc = enrichment
+        .get("ioc_matches")
+        .expect("should have ioc_matches");
+    assert_eq!(
+        ioc["malicious_ips"],
+        json!([{
+            "ip": "198.51.100.99",
+            "status": "blocklisted",
+            "sources": ["test-blocklist"],
+            "source_count": 1
+        }])
+    );
 }
 
 #[test]
@@ -107,9 +179,15 @@ fn threat_hunt_detects_sql_injection_in_plaintext_payload() {
 
     let enriched = enrich_and_analyze_log(log, &intel, &mut state, None);
 
-    let enrichment = enriched.get("forwarder_enrichment").expect("should have enrichment");
-    let hunt = enrichment.get("threat_hunting").expect("should have threat_hunting");
-    let patterns = hunt.get("suspicious_patterns").expect("should have suspicious_patterns");
+    let enrichment = enriched
+        .get("forwarder_enrichment")
+        .expect("should have enrichment");
+    let hunt = enrichment
+        .get("threat_hunting")
+        .expect("should have threat_hunting");
+    let patterns = hunt
+        .get("suspicious_patterns")
+        .expect("should have suspicious_patterns");
     let patterns_arr = patterns.as_array().expect("should be array");
     assert!(
         patterns_arr.iter().any(|p| p["pattern"] == "sql_injection"),
@@ -118,7 +196,7 @@ fn threat_hunt_detects_sql_injection_in_plaintext_payload() {
 }
 
 #[test]
-fn palo_alto_threat_log_is_parsed_and_enrichable() {
+fn palo_alto_threat_log_with_attack_name_adds_threat_hunting_enrichment() {
     let raw = "<14>Jun 02 13:10:13 PA-VM-01 1,2026/06/02 13:10:13,007951000123,THREAT,vulnerability,2561,2026/06/02 13:10:13,10.10.30.15,203.0.113.77,0.0.0.0,0.0.0.0,allow-dmz-web,,,web-browsing,vsys1,dmz,untrust,ethernet1/4,ethernet1/1,LFP-SIEM,2026/06/02 13:10:13,4839203,1,49822,80,0,0,0x400019,tcp,reset-both,/search.php?id=1%27%20OR%201=1,HTTP SQL Injection Attempt(40001),any,high,client-to-server,7408146363088945004";
 
     let parsed = parse_palo_alto_log_to_json(raw).expect("should parse");
@@ -130,7 +208,27 @@ fn palo_alto_threat_log_is_parsed_and_enrichable() {
     let mut state = crate::domain::behavioral::AlertHistory::default();
     let enriched = enrich_and_analyze_log(parsed, &intel, &mut state, None);
 
-    // Should at minimum preserve parsed fields
     assert_eq!(enriched["type"], "THREAT");
     assert_eq!(enriched["log_source"], "palo_alto");
+    assert_eq!(
+        enriched["forwarder_enrichment"]["threat_hunting"]["correlation_rules"][0]["rule"],
+        "sql_injection_attempt"
+    );
+}
+
+proptest! {
+    #[test]
+    fn duplicate_ipv4_iocs_are_reported_once_for_any_address(octets in any::<[u8; 4]>()) {
+        let ip = format!("{}.{}.{}.{}", octets[0], octets[1], octets[2], octets[3]);
+        let log = json!({
+            "source_address": ip,
+            "nested": {
+                "message": format!("repeated source {}", ip)
+            }
+        });
+
+        let iocs = extract_iocs(&log);
+
+        prop_assert_eq!(iocs.get("ip"), Some(&vec![ip]));
+    }
 }

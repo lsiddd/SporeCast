@@ -9,6 +9,7 @@ use crate::domain::rules::{
     CORRELATION_RULES_COMPILED, CRITICAL_ASSETS, DOMAIN_REGEX, ENABLE_BEHAVIORAL_ANALYSIS,
     HASH_REGEX, IP_REGEX, SUSPICIOUS_PATTERNS_COMPILED, SUSPICIOUS_PROCESSES, URL_REGEX,
 };
+use std::collections::HashSet;
 
 #[cfg(test)]
 #[path = "enrichment_tests.rs"]
@@ -47,6 +48,10 @@ pub fn extract_iocs(log_data: &Value) -> HashMap<&'static str, Vec<String>> {
     };
 
     find_recursive(log_data, &mut collect_matches);
+    for values in iocs.values_mut() {
+        let mut seen = HashSet::new();
+        values.retain(|value| seen.insert(value.clone()));
+    }
     debug!("Extracted IOCs: {:?}", iocs);
     iocs
 }
@@ -230,7 +235,10 @@ fn enrich_threat_hunt(log_data: &Value) -> Option<Value> {
 
     for process in SUSPICIOUS_PROCESSES.iter() {
         if combined_lower.contains(process) {
-            warn!("Threat Hunt: Suspicious process/keyword '{}' detected.", process);
+            warn!(
+                "Threat Hunt: Suspicious process/keyword '{}' detected.",
+                process
+            );
             hunt["suspicious_process"] = json!(process);
             found = true;
             break;

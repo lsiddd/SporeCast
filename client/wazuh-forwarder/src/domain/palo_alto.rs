@@ -6,7 +6,9 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 mod schema;
-use schema::{COMMON_HEADERS, FLOAT_FIELDS, INTEGER_FIELDS, THREAT_EXTRA_HEADERS, TRAFFIC_EXTRA_HEADERS};
+use schema::{
+    COMMON_HEADERS, FLOAT_FIELDS, INTEGER_FIELDS, THREAT_EXTRA_HEADERS, TRAFFIC_EXTRA_HEADERS,
+};
 
 // ==============================================================================
 // --- Palo Alto Log Parser ---
@@ -61,6 +63,13 @@ pub fn parse_palo_alto_log_to_json(raw_log: &str) -> Result<Value> {
         Some(Err(e)) => return Err(anyhow!("CSV parsing error: {}", e)),
         None => return Err(anyhow!("No CSV records found in log")),
     };
+    if record.len() < COMMON_HEADERS.len() {
+        return Err(anyhow!(
+            "Palo Alto log has {} CSV fields; expected at least {} common fields",
+            record.len(),
+            COMMON_HEADERS.len()
+        ));
+    }
 
     // Detect log type from field 3 to pick the correct extra-field schema.
     let log_type = record.get(3).map(|s| s.trim()).unwrap_or("");
@@ -246,6 +255,7 @@ pub fn format_json_to_palo_alto_syslog(log_json: &Value) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use serde_json::json;
 
     // Realistic TRAFFIC log line from palo_alto_pan_os_sample_firewall_realistic_v2.log
@@ -256,15 +266,58 @@ mod tests {
 
     #[test]
     fn parses_palo_alto_csv_fields_to_normalized_json() {
-        let raw =
-            "1,2026/06/02 12:00:00,SERIAL,TRAFFIC,threat,42,2026/06/02 12:00:01,10.0.0.1,8.8.8.8";
-        let parsed = parse_palo_alto_log_to_json(raw).expect("sample CSV should parse");
+        let raw = [
+            "1",
+            "2026/06/02 12:00:00",
+            "SERIAL",
+            "TRAFFIC",
+            "threat",
+            "42",
+            "2026/06/02 12:00:01",
+            "10.0.0.1",
+            "8.8.8.8",
+            "",
+            "",
+            "allow-web",
+            "",
+            "",
+            "ssl",
+            "vsys1",
+            "trust",
+            "untrust",
+            "ethernet1/2",
+            "ethernet1/1",
+            "LFP-SIEM",
+            "2026/06/02 12:00:02",
+            "123",
+            "1",
+            "54321",
+            "443",
+            "0",
+            "0",
+            "0x400019",
+            "tcp",
+            "allow",
+        ]
+        .join(",");
+        let parsed = parse_palo_alto_log_to_json(&raw).expect("sample CSV should parse");
 
         assert_eq!(parsed["log_number"], 1);
         assert_eq!(parsed["serial_number"], "SERIAL");
         assert_eq!(parsed["source_address"], "10.0.0.1");
         assert_eq!(parsed["destination_address"], "8.8.8.8");
         assert_eq!(parsed["log_source"], "palo_alto");
+    }
+
+    #[test]
+    fn rejects_non_csv_text_without_palo_alto_fields() {
+        let error = parse_palo_alto_log_to_json("this is not a palo alto log")
+            .expect_err("non-CSV text should not parse as a Palo Alto log");
+
+        assert!(
+            error.to_string().contains("Palo Alto"),
+            "unexpected parse error: {error}"
+        );
     }
 
     #[test]
@@ -322,7 +375,33 @@ mod tests {
     }
 
     #[test]
-    fn full_round_trip_parse_then_format() {
+    fn formatter_rejects_non_object_json() {
+        let error = format_json_to_palo_alto_syslog(&json!(["not", "an", "object"]))
+            .expect_err("non-object JSON cannot be formatted as syslog");
+
+        assert_eq!(
+            error.to_string(),
+            "Log JSON is not an object, cannot format to Palo Alto syslog."
+        );
+    }
+
+    #[test]
+    fn formatter_quotes_and_escapes_values_with_spaces_or_quotes() {
+        let log = json!({
+            "device_name": "pa 01",
+            "action": "allow \"quoted\"",
+            "source_address": "10.0.0.1"
+        });
+
+        let formatted = format_json_to_palo_alto_syslog(&log).expect("object should format");
+
+        assert!(formatted.contains("device_name=\"pa 01\""));
+        assert!(formatted.contains("action=\"allow \\\"quoted\\\"\""));
+        assert!(formatted.contains("src_ip=10.0.0.1"));
+    }
+
+    #[test]
+    fn formats_parsed_traffic_log_as_wazuh_syslog() {
         let parsed = parse_palo_alto_log_to_json(TRAFFIC_LOG).expect("should parse");
         let formatted = format_json_to_palo_alto_syslog(&parsed).expect("should format");
 
@@ -330,5 +409,26 @@ mod tests {
         assert!(formatted.contains("src_ip=10.10.10.25"));
         assert!(formatted.contains("dst_ip=198.51.100.14"));
         assert!(formatted.contains("action=allow"));
+    }
+
+    proptest! {
+        #[test]
+        fn formatter_escapes_quotes_inside_string_values(action in "[ -~]{0,40}") {
+            let log = json!({ "action": action.clone() });
+
+            let formatted = format_json_to_palo_alto_syslog(&log)
+                .expect("object should format");
+
+            if action.contains('"') {
+                prop_assert!(
+                    formatted.contains("\\\""),
+                    "quoted action should contain escaped quote, formatted={formatted:?}"
+                );
+                prop_assert!(
+                    !formatted.contains(&format!("action=\"{}\"", action)),
+                    "quoted action must not be emitted with raw interior quote"
+                );
+            }
+        }
     }
 }

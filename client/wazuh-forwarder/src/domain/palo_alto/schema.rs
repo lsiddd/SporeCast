@@ -75,107 +75,107 @@ pub(super) const TRAFFIC_EXTRA_HEADERS: &[&str] = &[
     "Policy-ID",                         // 68
     "Link-Switches",                     // 69
     "SD-WAN-Cluster",                    // 70
-    "SD-WAN-Device-Type",               // 71
-    "SD-WAN-Cluster-Type",              // 72
+    "SD-WAN-Device-Type",                // 71
+    "SD-WAN-Cluster-Type",               // 72
     "SD-WAN-Site",                       // 73
-    "Dynamic-User-Group-Name",          // 74
-    "X-Forwarded-For-Address",          // 75
-    "Source-Device-Category",           // 76
-    "Source-Device-Profile",            // 77
-    "Source-Device-Model",              // 78
-    "Source-Device-Vendor",             // 79
-    "Source-Device-OS-Family",          // 80
-    "Source-Device-OS-Version",         // 81
-    "Source-Hostname",                  // 82
-    "Source-MAC-Address",               // 83
-    "Destination-Device-Category",      // 84
-    "Destination-Device-Profile",       // 85
-    "Destination-Device-Model",         // 86
-    "Destination-Device-Vendor",        // 87
-    "Destination-Device-OS-Family",     // 88
-    "Destination-Device-OS-Version",    // 89
-    "Destination-Hostname",             // 90
-    "Destination-MAC-Address",          // 91
-    "Container-ID",                     // 92
-    "POD-Namespace",                    // 93
-    "POD-Name",                         // 94
-    "Source-External-Dynamic-List",     // 95
-    "Destination-External-Dynamic-List",// 96
-    "Host-ID",                          // 97
-    "User-Device-Serial-Number",        // 98
-    "Source-Dynamic-Address-Group",     // 99
-    "Destination-Dynamic-Address-Group",// 100
-    "Session-Owner",                    // 101
-    "High-Resolution-Timestamp",        // 102
-    "A-Slice-Service-Type",             // 103
-    "A-Slice-Differentiator",           // 104
-    "Application-Subcategory",          // 105
-    "Application-Category",             // 106
-    "Application-Technology",           // 107
-    "Application-Risk",                 // 108
-    "Application-Characteristics",      // 109
-    "Application-Container-Name",       // 110
-    "Tunneled-Application",             // 111
-    "is-SAAS-App",                      // 112
-    "Application-Sanctioned-State",     // 113
-    "Offloaded",                        // 114
+    "Dynamic-User-Group-Name",           // 74
+    "X-Forwarded-For-Address",           // 75
+    "Source-Device-Category",            // 76
+    "Source-Device-Profile",             // 77
+    "Source-Device-Model",               // 78
+    "Source-Device-Vendor",              // 79
+    "Source-Device-OS-Family",           // 80
+    "Source-Device-OS-Version",          // 81
+    "Source-Hostname",                   // 82
+    "Source-MAC-Address",                // 83
+    "Destination-Device-Category",       // 84
+    "Destination-Device-Profile",        // 85
+    "Destination-Device-Model",          // 86
+    "Destination-Device-Vendor",         // 87
+    "Destination-Device-OS-Family",      // 88
+    "Destination-Device-OS-Version",     // 89
+    "Destination-Hostname",              // 90
+    "Destination-MAC-Address",           // 91
+    "Container-ID",                      // 92
+    "POD-Namespace",                     // 93
+    "POD-Name",                          // 94
+    "Source-External-Dynamic-List",      // 95
+    "Destination-External-Dynamic-List", // 96
+    "Host-ID",                           // 97
+    "User-Device-Serial-Number",         // 98
+    "Source-Dynamic-Address-Group",      // 99
+    "Destination-Dynamic-Address-Group", // 100
+    "Session-Owner",                     // 101
+    "High-Resolution-Timestamp",         // 102
+    "A-Slice-Service-Type",              // 103
+    "A-Slice-Differentiator",            // 104
+    "Application-Subcategory",           // 105
+    "Application-Category",              // 106
+    "Application-Technology",            // 107
+    "Application-Risk",                  // 108
+    "Application-Characteristics",       // 109
+    "Application-Container-Name",        // 110
+    "Tunneled-Application",              // 111
+    "is-SAAS-App",                       // 112
+    "Application-Sanctioned-State",      // 113
+    "Offloaded",                         // 114
 ];
 
 // Fields 31+ for THREAT logs (URL/file/spyware/vulnerability/etc.).
 pub(super) const THREAT_EXTRA_HEADERS: &[&str] = &[
-    "Threat Name",                       // 31
-    "Threat ID",                         // 32
-    "Category",                          // 33
-    "Severity",                          // 34
-    "Direction",                         // 35
-    "Sequence Number",                   // 36
-    "Action Flags",                      // 37
-    "Source Location",                   // 38
-    "Destination Location",              // 39
-    "Padding",                           // 40
-    "Content Type",                      // 41
-    "PCAP ID",                           // 42
-    "File Digest",                       // 43
-    "Cloud",                             // 44
-    "URL Index",                         // 45
-    "User Agent",                        // 46
-    "File Type",                         // 47
-    "X-Forwarded-For",                   // 48
-    "Referer",                           // 49
-    "Sender",                            // 50
-    "Subject",                           // 51
-    "Recipient",                         // 52
-    "Report ID",                         // 53
-    "Device Group Hierarchy Level 1",    // 54
-    "Device Group Hierarchy Level 2",    // 55
-    "Device Group Hierarchy Level 3",    // 56
-    "Device Group Hierarchy Level 4",    // 57
-    "Virtual System Name",               // 58
-    "Device Name",                       // 59
-    "Source VM UUID",                    // 60
-    "Destination VM UUID",               // 61
-    "HTTP/2 Connection",                 // 62
-    "High-Resolution-Timestamp",         // 63
-    "SD-WAN-Cluster",                    // 64
-    "SD-WAN-Device-Type",               // 65
-    "SD-WAN-Cluster-Type",              // 66
-    "SD-WAN-Site",                       // 67
-    "Application-Subcategory",           // 68
-    "Application-Category",              // 69
-    "Application-Technology",            // 70
-    "Application-Risk",                  // 71
-    "Application-Characteristics",       // 72
-    "Application-Container-Name",        // 73
-    "Tunneled-Application",              // 74
-    "is-SAAS-App",                       // 75
-    "Application-Sanctioned-State",      // 76
-    "X-Forwarded-For-Address",          // 77
-    "Source-Device-Category",           // 78
-    "Source-Device-Profile",            // 79
-    "Nssai-Sst",                        // 80
-    "Nssai-Sd",                         // 81
-    "Partial-Hash",                     // 82
-    "High-Resolution-Timestamp-2",      // 83
+    "Threat Name",                    // 31
+    "Threat ID",                      // 32
+    "Category",                       // 33
+    "Severity",                       // 34
+    "Direction",                      // 35
+    "Sequence Number",                // 36
+    "Action Flags",                   // 37
+    "Source Location",                // 38
+    "Destination Location",           // 39
+    "Padding",                        // 40
+    "Content Type",                   // 41
+    "PCAP ID",                        // 42
+    "File Digest",                    // 43
+    "Cloud",                          // 44
+    "URL Index",                      // 45
+    "User Agent",                     // 46
+    "File Type",                      // 47
+    "X-Forwarded-For",                // 48
+    "Referer",                        // 49
+    "Sender",                         // 50
+    "Subject",                        // 51
+    "Recipient",                      // 52
+    "Report ID",                      // 53
+    "Device Group Hierarchy Level 1", // 54
+    "Device Group Hierarchy Level 2", // 55
+    "Device Group Hierarchy Level 3", // 56
+    "Device Group Hierarchy Level 4", // 57
+    "Virtual System Name",            // 58
+    "Device Name",                    // 59
+    "Source VM UUID",                 // 60
+    "Destination VM UUID",            // 61
+    "HTTP/2 Connection",              // 62
+    "High-Resolution-Timestamp",      // 63
+    "SD-WAN-Cluster",                 // 64
+    "SD-WAN-Device-Type",             // 65
+    "SD-WAN-Cluster-Type",            // 66
+    "SD-WAN-Site",                    // 67
+    "Application-Subcategory",        // 68
+    "Application-Category",           // 69
+    "Application-Technology",         // 70
+    "Application-Risk",               // 71
+    "Application-Characteristics",    // 72
+    "Application-Container-Name",     // 73
+    "Tunneled-Application",           // 74
+    "is-SAAS-App",                    // 75
+    "Application-Sanctioned-State",   // 76
+    "X-Forwarded-For-Address",        // 77
+    "Source-Device-Category",         // 78
+    "Source-Device-Profile",          // 79
+    "Nssai-Sst",                      // 80
+    "Nssai-Sd",                       // 81
+    "Partial-Hash",                   // 82
+    "High-Resolution-Timestamp-2",    // 83
 ];
 
 pub(super) const INTEGER_FIELDS: &[&str] = &[
@@ -203,4 +203,5 @@ pub(super) const INTEGER_FIELDS: &[&str] = &[
     "Report ID",
 ];
 
-pub(super) const FLOAT_FIELDS: &[&str] = &["High-Resolution-Timestamp", "High-Resolution-Timestamp-2"];
+pub(super) const FLOAT_FIELDS: &[&str] =
+    &["High-Resolution-Timestamp", "High-Resolution-Timestamp-2"];

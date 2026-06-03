@@ -54,10 +54,7 @@ pub fn is_public_ip(ip_str: &str) -> bool {
                 && !ip.is_unspecified()
                 && !ip.is_multicast()
                 && !ip.is_documentation();
-            debug!(
-                "Checking IPv4 '{}': public={}",
-                ip_str, is_public
-            );
+            debug!("Checking IPv4 '{}': public={}", ip_str, is_public);
             is_public
         }
         Ok(IpAddr::V6(ip)) => {
@@ -65,11 +62,9 @@ pub fn is_public_ip(ip_str: &str) -> bool {
                 && !ip.is_unspecified()
                 && !ip.is_multicast()
                 && !is_ipv6_link_local(&ip)
-                && !is_ipv6_unique_local(&ip);
-            debug!(
-                "Checking IPv6 '{}': public={}",
-                ip_str, is_public
-            );
+                && !is_ipv6_unique_local(&ip)
+                && !is_ipv6_documentation(&ip);
+            debug!("Checking IPv6 '{}': public={}", ip_str, is_public);
             is_public
         }
         Err(_) => {
@@ -90,9 +85,17 @@ fn is_ipv6_unique_local(ip: &Ipv6Addr) -> bool {
     ip.octets()[0] & 0xfe == 0xfc
 }
 
+fn is_ipv6_documentation(ip: &Ipv6Addr) -> bool {
+    // 2001:db8::/32
+    let octets = ip.octets();
+    octets[0] == 0x20 && octets[1] == 0x01 && octets[2] == 0x0d && octets[3] == 0xb8
+}
+
 #[cfg(test)]
 mod tests {
     use super::is_public_ip;
+    use proptest::prelude::*;
+    use std::net::Ipv4Addr;
 
     #[test]
     fn public_ip_filter_rejects_private_and_accepts_public_ipv4() {
@@ -122,9 +125,30 @@ mod tests {
     }
 
     #[test]
+    fn public_ip_filter_rejects_ipv6_documentation_range() {
+        assert!(!is_public_ip("2001:db8::1"));
+    }
+
+    #[test]
     fn public_ip_filter_rejects_invalid_strings() {
         assert!(!is_public_ip("not-an-ip"));
         assert!(!is_public_ip(""));
         assert!(!is_public_ip("example.com"));
+    }
+
+    proptest! {
+        #[test]
+        fn public_ip_filter_rejects_std_special_ipv4_ranges(octets in any::<[u8; 4]>()) {
+            let ip = Ipv4Addr::from(octets);
+
+            if ip.is_private()
+                || ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || ip.is_documentation()
+            {
+                prop_assert!(!is_public_ip(&ip.to_string()));
+            }
+        }
     }
 }
