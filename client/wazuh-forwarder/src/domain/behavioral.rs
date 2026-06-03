@@ -165,6 +165,7 @@ impl AlertHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Duration;
 
     #[test]
     fn oversized_logid_is_ignored_in_behavioral_counters() {
@@ -189,27 +190,31 @@ mod tests {
         }
 
         let anomaly = history.is_suspicious_activity(&log);
-        assert!(anomaly.is_some(), "should detect high-frequency IP via source_address");
-        assert!(anomaly.unwrap().get("high_frequency_ip").is_some());
+        let anomaly = anomaly.expect("should detect high-frequency IP via source_address");
+        assert_eq!(
+            anomaly["high_frequency_ip"],
+            json!({ "count": HIGH_SEVERITY_THRESHOLD + 1, "time_window_minutes": BEHAVIOR_WINDOW_MINUTES })
+        );
     }
 
     #[test]
-    fn source_address_preferred_over_srcip_fallback() {
+    fn source_address_wins_when_fallback_srcip_is_also_present() {
         let mut history = AlertHistory::default();
-        // Feed via source_address
-        let log = json!({ "source_address": "1.2.3.4" });
+        let log = json!({
+            "source_address": "1.2.3.4",
+            "srcip": "5.6.7.8"
+        });
+
         for _ in 0..=HIGH_SEVERITY_THRESHOLD {
             history.update(&log);
         }
-        assert!(history.is_suspicious_activity(&log).is_some());
 
-        // Separate history with srcip fallback
-        let mut history2 = AlertHistory::default();
-        let log2 = json!({ "srcip": "5.6.7.8" });
-        for _ in 0..=HIGH_SEVERITY_THRESHOLD {
-            history2.update(&log2);
-        }
-        assert!(history2.is_suspicious_activity(&log2).is_some());
+        assert_eq!(
+            history.src_ips.peek("1.2.3.4").copied(),
+            Some(HIGH_SEVERITY_THRESHOLD + 1)
+        );
+        assert_eq!(history.src_ips.peek("5.6.7.8").copied(), None);
+        assert!(history.is_suspicious_activity(&log).is_some());
     }
 
     #[test]
@@ -222,5 +227,79 @@ mod tests {
         }
 
         assert!(history.is_suspicious_activity(&log).is_none());
+    }
+
+    #[test]
+    fn expired_behavior_window_clears_previous_counts() {
+        let mut history = AlertHistory::default();
+        history
+            .src_ips
+            .put("203.0.113.1".to_string(), HIGH_SEVERITY_THRESHOLD + 1);
+        history.last_alert_time = Utc::now() - Duration::minutes(BEHAVIOR_WINDOW_MINUTES + 1);
+        let new_log = json!({ "source_address": "203.0.113.2" });
+
+        history.update(&new_log);
+
+        assert_eq!(history.src_ips.peek("203.0.113.1").copied(), None);
+        assert_eq!(history.src_ips.peek("203.0.113.2").copied(), Some(1));
+        assert_eq!(history.is_suspicious_activity(&new_log), None);
+    }
+
+    #[test]
+    fn user_threshold_detects_high_frequency_user() {
+        let mut history = AlertHistory::default();
+        let log = json!({ "user": "alice" });
+
+        for _ in 0..=HIGH_SEVERITY_THRESHOLD {
+            history.update(&log);
+        }
+
+        assert_eq!(
+            history.is_suspicious_activity(&log),
+            Some(json!({
+                "high_frequency_user": {
+                    "count": HIGH_SEVERITY_THRESHOLD + 1,
+                    "time_window_minutes": BEHAVIOR_WINDOW_MINUTES
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn merge_sums_worker_counts_for_same_ip_user_and_logid() {
+        let log = json!({
+            "source_address": "203.0.113.55",
+            "user": "alice",
+            "logid": 1001
+        });
+        let mut first_worker = AlertHistory::default();
+        let mut second_worker = AlertHistory::default();
+
+        for _ in 0..6 {
+            first_worker.update(&log);
+        }
+        for _ in 0..5 {
+            second_worker.update(&log);
+        }
+
+        first_worker.merge(second_worker);
+
+        assert_eq!(
+            first_worker.is_suspicious_activity(&log),
+            Some(json!({
+                "high_frequency_ip": {
+                    "count": HIGH_SEVERITY_THRESHOLD + 1,
+                    "time_window_minutes": BEHAVIOR_WINDOW_MINUTES
+                },
+                "high_frequency_user": {
+                    "count": HIGH_SEVERITY_THRESHOLD + 1,
+                    "time_window_minutes": BEHAVIOR_WINDOW_MINUTES
+                },
+                "high_frequency_logid": {
+                    "count": HIGH_SEVERITY_THRESHOLD + 1,
+                    "time_window_minutes": BEHAVIOR_WINDOW_MINUTES
+                }
+            }))
+        );
     }
 }

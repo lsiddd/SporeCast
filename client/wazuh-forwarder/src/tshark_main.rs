@@ -1,9 +1,8 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 
 use wazuh_forwarder::{
-    infrastructure::config::ForwarderConfig,
-    infrastructure::logging::configure_logging_with_opts,
+    infrastructure::config::ForwarderConfig, infrastructure::logging::configure_logging_with_opts,
     interface::tshark::run,
 };
 
@@ -32,6 +31,7 @@ async fn main() -> Result<()> {
         ForwarderConfig::load_from_file(&cli.config).unwrap_or_else(|_| ForwarderConfig::default());
 
     config.resolve_user_paths();
+    config.validate().context("Config validation failed")?;
     configure_logging_with_opts(&config, cli.stdout)?;
 
     run(config, cli.stdout).await

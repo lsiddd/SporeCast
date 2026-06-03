@@ -266,7 +266,11 @@ impl ForwarderConfig {
         if self.logging.state_file.starts_with("/var/") {
             self.logging.state_file = format!("{}/state.json", run_dir);
         }
-        if self.threat_intelligence.threat_intel_cache_dir.starts_with("/var/") {
+        if self
+            .threat_intelligence
+            .threat_intel_cache_dir
+            .starts_with("/var/")
+        {
             self.threat_intelligence.threat_intel_cache_dir =
                 format!("{}/threat_intel_cache", run_dir);
         }
@@ -279,23 +283,188 @@ impl ForwarderConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn unique_config_file(name: &str) -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!(
+                "wazuh_forwarder_{name}_{}_{}.toml",
+                std::process::id(),
+                nanos
+            ))
+            .display()
+            .to_string()
+    }
+
+    fn valid_config_toml() -> String {
+        r#"
+[forwarder]
+type = "tshark"
+
+[network]
+syslog_port = 1515
+wazuh_host = "127.0.0.2"
+wazuh_port = 1516
+elk_host = "127.0.0.3"
+elk_port = 1517
+elk_index_name = "loaded-index"
+socket_timeout_secs = 9
+
+[logging]
+log_file = "run/test-forwarder.log"
+state_file = "run/test-state.json"
+
+[performance]
+max_receiver_queue_size = 11
+max_enrichment_queue_size = 12
+max_wazuh_queue_size = 13
+enrichment_worker_count = 2
+elk_batch_size = 3
+elk_batch_flush_interval_secs = 4
+
+[threat_intelligence]
+enable_threat_intel_feeds = false
+threat_intel_refresh_interval_secs = 99
+threat_intel_cache_dir = "run/test-cache"
+
+[behavioral_analysis]
+enable_behavioral_analysis = true
+behavior_window_minutes = 7
+high_severity_threshold = 8
+
+[geoip]
+enabled = false
+database_path = "run/test.mmdb"
+"#
+        .to_string()
+    }
 
     #[test]
-    fn validation_rejects_zero_queue_and_batch_sizes() {
-        let mut config = ForwarderConfig::default();
-        config.performance.max_receiver_queue_size = 0;
-        assert!(config.validate().is_err());
+    fn valid_toml_config_loads_all_sections() {
+        let config_file = unique_config_file("valid_config");
+        fs::write(&config_file, valid_config_toml()).expect("config fixture should be written");
 
-        let mut config = ForwarderConfig::default();
-        config.performance.max_enrichment_queue_size = 0;
-        assert!(config.validate().is_err());
+        let config = ForwarderConfig::load_from_file(&config_file)
+            .expect("valid config fixture should load");
 
-        let mut config = ForwarderConfig::default();
-        config.performance.max_wazuh_queue_size = 0;
-        assert!(config.validate().is_err());
+        assert_eq!(config.forwarder.forwarder_type, "tshark");
+        assert_eq!(config.network.syslog_port, 1515);
+        assert_eq!(config.network.elk_host, "127.0.0.3");
+        assert_eq!(config.performance.enrichment_worker_count, 2);
+        assert_eq!(config.performance.elk_batch_flush_interval_secs, 4);
+        assert_eq!(
+            config.threat_intelligence.threat_intel_cache_dir,
+            "run/test-cache"
+        );
+        assert_eq!(config.geoip.enabled, false);
+        assert!(config.validate().is_ok());
 
+        let _ = fs::remove_file(config_file);
+    }
+
+    #[test]
+    fn missing_config_file_returns_read_error_with_path() {
+        let config_file = unique_config_file("missing_config");
+
+        let error = ForwarderConfig::load_from_file(&config_file)
+            .expect_err("missing config should return a read error");
+
+        match error {
+            ConfigError::Read { path, .. } => assert_eq!(path, config_file),
+            other => panic!("expected ConfigError::Read, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn var_paths_are_remapped_to_run_directory() {
         let mut config = ForwarderConfig::default();
-        config.performance.elk_batch_size = 0;
-        assert!(config.validate().is_err());
+        config.logging.log_file = "/var/log/wazuh-forwarder/forwarder.log".to_string();
+        config.logging.state_file = "/var/lib/wazuh-forwarder/state.json".to_string();
+        config.threat_intelligence.threat_intel_cache_dir =
+            "/var/cache/wazuh-forwarder/threat_intel".to_string();
+        config.geoip.database_path = "/var/lib/wazuh-forwarder/geoip.mmdb".to_string();
+
+        config.resolve_user_paths();
+
+        assert_eq!(config.logging.log_file, "run/forwarder.log");
+        assert_eq!(config.logging.state_file, "run/state.json");
+        assert_eq!(
+            config.threat_intelligence.threat_intel_cache_dir,
+            "run/threat_intel_cache"
+        );
+        assert_eq!(config.geoip.database_path, "run/geoip/dbip-city-lite.mmdb");
+    }
+
+    #[test]
+    fn invalid_zero_runtime_limits_return_specific_validation_errors() {
+        let cases: Vec<(fn(&mut ForwarderConfig), &str)> = vec![
+            (
+                |config| config.network.syslog_port = 0,
+                "syslog port cannot be 0",
+            ),
+            (|config| config.network.elk_port = 0, "ELK port cannot be 0"),
+            (
+                |config| config.network.wazuh_port = 0,
+                "Wazuh port cannot be 0",
+            ),
+            (
+                |config| config.performance.enrichment_worker_count = 0,
+                "worker count cannot be 0",
+            ),
+            (
+                |config| config.performance.max_receiver_queue_size = 0,
+                "receiver queue size cannot be 0",
+            ),
+            (
+                |config| config.performance.max_enrichment_queue_size = 0,
+                "enrichment queue size cannot be 0",
+            ),
+            (
+                |config| config.performance.max_wazuh_queue_size = 0,
+                "Wazuh queue size cannot be 0",
+            ),
+            (
+                |config| config.performance.elk_batch_size = 0,
+                "ELK batch size cannot be 0",
+            ),
+            (
+                |config| config.performance.elk_batch_flush_interval_secs = 0,
+                "ELK batch flush interval cannot be 0",
+            ),
+        ];
+
+        for (mutate, expected_message) in cases {
+            let mut config = ForwarderConfig::default();
+            mutate(&mut config);
+
+            let error = config.validate().expect_err("config should be rejected");
+
+            assert_eq!(
+                error.to_string(),
+                format!("invalid configuration: {expected_message}")
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_forwarder_type_is_rejected_with_type_name() {
+        let mut config = ForwarderConfig::default();
+        config.forwarder.forwarder_type = "fortigate".to_string();
+
+        let error = config
+            .validate()
+            .expect_err("unknown forwarder type should be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "invalid configuration: invalid forwarder type: fortigate"
+        );
     }
 }

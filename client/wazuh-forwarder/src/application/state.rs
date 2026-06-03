@@ -77,3 +77,120 @@ impl StateManager {
         self.state.alert_history.merge(worker_state.clone());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn unique_state_file(name: &str) -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!(
+                "wazuh_forwarder_{name}_{}_{}.json",
+                std::process::id(),
+                nanos
+            ))
+            .display()
+            .to_string()
+    }
+
+    #[test]
+    fn save_then_load_preserves_file_offset_without_behavioral_history() {
+        let state_file = unique_state_file("state_round_trip");
+        let mut manager = StateManager::new(&state_file);
+        manager.state.inode = Some(42);
+        manager.state.offset = 4096;
+        manager
+            .state
+            .alert_history
+            .update(&json!({ "source_address": "203.0.113.10" }));
+
+        manager.save().expect("state should save");
+
+        let saved = fs::read_to_string(&state_file).expect("saved state file should exist");
+        assert!(!saved.contains("alert_history"));
+
+        let mut reloaded = StateManager::new(&state_file);
+        reloaded.load().expect("state should load");
+
+        assert_eq!(reloaded.state.inode, Some(42));
+        assert_eq!(reloaded.state.offset, 4096);
+        assert_eq!(
+            reloaded.state.alert_history.src_ips.peek("203.0.113.10"),
+            None
+        );
+
+        let _ = fs::remove_file(state_file);
+    }
+
+    #[test]
+    fn corrupt_state_file_returns_parse_error() {
+        let state_file = unique_state_file("corrupt_state");
+        fs::write(&state_file, "{not valid json").expect("corrupt state should be written");
+        let mut manager = StateManager::new(&state_file);
+
+        let error = manager
+            .load()
+            .expect_err("corrupt JSON should fail to load");
+
+        assert!(
+            error.to_string().contains("Failed to parse state file"),
+            "unexpected error: {error}"
+        );
+
+        let _ = fs::remove_file(state_file);
+    }
+
+    #[test]
+    fn missing_state_file_keeps_default_state() {
+        let state_file = unique_state_file("missing_state");
+        let mut manager = StateManager::new(&state_file);
+
+        manager
+            .load()
+            .expect("missing state file should be accepted");
+
+        assert_eq!(manager.state.inode, None);
+        assert_eq!(manager.state.offset, 0);
+        assert_eq!(manager.state.alert_history.src_ips.len(), 0);
+    }
+
+    #[test]
+    fn save_creates_missing_parent_directories() {
+        let state_file = std::env::temp_dir()
+            .join(format!(
+                "wazuh_forwarder_nested_{}_{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system clock should be after epoch")
+                    .as_nanos()
+            ))
+            .join("state")
+            .join("state.json");
+        let state_file = state_file.display().to_string();
+        let mut manager = StateManager::new(&state_file);
+        manager.state.inode = Some(7);
+        manager.state.offset = 128;
+
+        manager
+            .save()
+            .expect("state save should create parent directories");
+
+        let saved = fs::read_to_string(&state_file).expect("state file should exist");
+        assert!(saved.contains("\"inode\":7"));
+        assert!(saved.contains("\"offset\":128"));
+
+        if let Some(root) = Path::new(&state_file).ancestors().nth(2) {
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+}

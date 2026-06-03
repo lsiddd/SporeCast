@@ -1,5 +1,5 @@
-use serde_json::{json, Value};
 use serde_json::map::Map;
+use serde_json::{json, Value};
 
 /// Normalize a tshark EK-format packet JSON into a unified log Value.
 ///
@@ -175,7 +175,10 @@ mod tests {
         let result = normalize_packet(&packet).expect("IPv6 TCP packet should normalize");
 
         assert_eq!(result["source_address"], "2a04:4e42:3b::820");
-        assert_eq!(result["destination_address"], "2804:1434:1de:2000:a34b:2c44:98ac:570c");
+        assert_eq!(
+            result["destination_address"],
+            "2804:1434:1de:2000:a34b:2c44:98ac:570c"
+        );
         assert_eq!(result["ip_version"], 6);
         assert_eq!(result["Source Port"], 443);
         assert_eq!(result["Destination Port"], 54768);
@@ -217,5 +220,79 @@ mod tests {
             }
         });
         assert!(normalize_packet(&packet).is_none());
+    }
+
+    #[test]
+    fn invalid_timestamp_returns_none() {
+        let packet = json!({
+            "timestamp": "not-a-number",
+            "layers": {
+                "ip": { "ip_ip_src": "1.2.3.4", "ip_ip_dst": "5.6.7.8" }
+            }
+        });
+
+        assert_eq!(normalize_packet(&packet), None);
+    }
+
+    #[test]
+    fn packet_with_only_source_ip_still_normalizes() {
+        let packet = json!({
+            "timestamp": "1780410712000",
+            "layers": {
+                "ip": { "ip_ip_src": "192.0.2.10" }
+            }
+        });
+
+        let result = normalize_packet(&packet).expect("source-only IP packet should normalize");
+
+        assert_eq!(result["source_address"], "192.0.2.10");
+        assert_eq!(result["destination_address"], "");
+        assert_eq!(result["ip_version"], 4);
+    }
+
+    #[test]
+    fn preserves_raw_layers_and_normalized_fields_override_collisions() {
+        let packet = json!({
+            "timestamp": "1780410712000",
+            "layers": {
+                "source_address": "raw-collision",
+                "ip": {
+                    "ip_ip_src": "192.0.2.10",
+                    "ip_ip_dst": "8.8.8.8"
+                },
+                "frame": {
+                    "frame_frame_len": "72"
+                }
+            }
+        });
+
+        let result = normalize_packet(&packet).expect("packet with IP layer should normalize");
+
+        assert_eq!(result["ip"]["ip_ip_src"], "192.0.2.10");
+        assert_eq!(result["source_address"], "192.0.2.10");
+        assert_eq!(result["destination_address"], "8.8.8.8");
+    }
+
+    #[test]
+    fn invalid_transport_ports_default_to_zero() {
+        let packet = json!({
+            "timestamp": "1780410712000",
+            "layers": {
+                "ip": {
+                    "ip_ip_src": "192.0.2.10",
+                    "ip_ip_dst": "8.8.8.8"
+                },
+                "tcp": {
+                    "tcp_tcp_srcport": "not-a-port",
+                    "tcp_tcp_dstport": "99999"
+                }
+            }
+        });
+
+        let result = normalize_packet(&packet).expect("packet with IP layer should normalize");
+
+        assert_eq!(result["Source Port"], 0);
+        assert_eq!(result["Destination Port"], 0);
+        assert_eq!(result["ip_protocol"], "TCP");
     }
 }

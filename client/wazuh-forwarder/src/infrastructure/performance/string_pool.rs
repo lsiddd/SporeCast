@@ -70,3 +70,46 @@ impl StringPool {
 pub static STRING_POOL: once_cell::sync::Lazy<StringPool> =
     once_cell::sync::Lazy::new(|| StringPool::new(STRING_POOL_MAX_SIZE));
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn returned_small_string_is_cleared_and_reused() {
+        let pool = StringPool::new(1);
+        let mut reusable = pool.get_string();
+        reusable.push_str("payload");
+
+        pool.return_string(reusable);
+        let reused = pool.get_string();
+
+        assert_eq!(reused, "");
+        assert_eq!(pool.stats(), (1, 1));
+    }
+
+    #[test]
+    fn oversized_string_is_not_reused() {
+        let pool = StringPool::new(1);
+        let oversized = String::with_capacity(MAX_REUSABLE_STRING_CAPACITY + 1);
+
+        pool.return_string(oversized);
+        let fresh = pool.get_string();
+
+        assert_eq!(fresh.capacity(), INITIAL_STRING_CAPACITY);
+        assert_eq!(pool.stats(), (1, 0));
+    }
+
+    #[test]
+    fn pool_never_stores_more_than_max_size() {
+        let pool = StringPool::new(1);
+        let first = pool.get_string();
+        let second = pool.get_string();
+
+        pool.return_string(first);
+        pool.return_string(second);
+        let _reused = pool.get_string();
+        let _allocated = pool.get_string();
+
+        assert_eq!(pool.stats(), (3, 1));
+    }
+}

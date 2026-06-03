@@ -240,3 +240,42 @@ pub(super) fn increment_saturating(counter: &AtomicUsize, ordering: Ordering) ->
         Ok(previous) | Err(previous) => previous.saturating_add(1),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn circuit_breaker_opens_after_failure_threshold_and_blocks_execution() {
+        let breaker = CircuitBreaker::new("test_downstream");
+
+        for _ in 0..CIRCUIT_BREAKER_FAILURE_THRESHOLD {
+            breaker.record_failure();
+        }
+
+        assert_eq!(breaker.state(), CircuitState::Open);
+        assert!(!breaker.can_execute());
+    }
+
+    #[test]
+    fn queue_monitor_treats_zero_capacity_as_high_load() {
+        let monitor = QueueMonitor::new();
+
+        let is_high = monitor.check_queue_health(1, 0, "test_queue");
+
+        assert_eq!(is_high, true);
+        assert_eq!(monitor.is_high_load(), true);
+    }
+
+    #[test]
+    fn queue_monitor_marks_threshold_utilization_as_high_load() {
+        let monitor = QueueMonitor::new();
+
+        let below_threshold = monitor.check_queue_health(79, 100, "test_queue");
+        let at_threshold = monitor.check_queue_health(80, 100, "test_queue");
+
+        assert_eq!(below_threshold, false);
+        assert_eq!(at_threshold, true);
+        assert_eq!(monitor.is_high_load(), true);
+    }
+}
