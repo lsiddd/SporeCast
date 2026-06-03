@@ -54,7 +54,7 @@ lazy_static::lazy_static! {
         patterns.insert("xss_attempt".to_string(),
             compile_regex(r"(?i)(?:<script|javascript:|onload=|onerror=|onclick=|onmouseover=)"));
         patterns.insert("command_injection".to_string(),
-            compile_regex(r"(?i)(?:;|\|\||&&|`|\$\(|\$\{|%[0-9a-fA-F]\{2\})"));
+            compile_regex(r"(?i)(?:;|\|\||&&|`|\$\(|\$\{|%[0-9a-fA-F]{2})"));
         patterns.insert("directory_traversal".to_string(),
             compile_regex(r"(?i)(?:\.\./|\.\.\\|/etc/|c:\\|%2e%2e%2f|%2e%2e%5c)"));
 

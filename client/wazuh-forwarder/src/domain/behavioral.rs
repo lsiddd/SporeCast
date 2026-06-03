@@ -51,7 +51,8 @@ impl AlertHistory {
         self.last_alert_time = now;
 
         if let Some(src_ip) = log_data
-            .get("srcip")
+            .get("source_address")
+            .or_else(|| log_data.get("srcip"))
             .or_else(|| log_data.get("src"))
             .and_then(Value::as_str)
         {
@@ -83,7 +84,8 @@ impl AlertHistory {
         let mut found_anomaly = false;
 
         if let Some(src_ip) = log_data
-            .get("srcip")
+            .get("source_address")
+            .or_else(|| log_data.get("srcip"))
             .or_else(|| log_data.get("src"))
             .and_then(Value::as_str)
         {
@@ -170,6 +172,52 @@ mod tests {
         let log = json!({ "logid": u64::from(u32::MAX) + 1 });
 
         for _ in 0..=HIGH_SEVERITY_THRESHOLD {
+            history.update(&log);
+        }
+
+        assert!(history.is_suspicious_activity(&log).is_none());
+    }
+
+    #[test]
+    fn detects_high_frequency_ip_via_source_address_field() {
+        // Both palo_alto and tshark parsers produce "source_address"
+        let mut history = AlertHistory::default();
+        let log = json!({ "source_address": "203.0.113.77" });
+
+        for _ in 0..=HIGH_SEVERITY_THRESHOLD {
+            history.update(&log);
+        }
+
+        let anomaly = history.is_suspicious_activity(&log);
+        assert!(anomaly.is_some(), "should detect high-frequency IP via source_address");
+        assert!(anomaly.unwrap().get("high_frequency_ip").is_some());
+    }
+
+    #[test]
+    fn source_address_preferred_over_srcip_fallback() {
+        let mut history = AlertHistory::default();
+        // Feed via source_address
+        let log = json!({ "source_address": "1.2.3.4" });
+        for _ in 0..=HIGH_SEVERITY_THRESHOLD {
+            history.update(&log);
+        }
+        assert!(history.is_suspicious_activity(&log).is_some());
+
+        // Separate history with srcip fallback
+        let mut history2 = AlertHistory::default();
+        let log2 = json!({ "srcip": "5.6.7.8" });
+        for _ in 0..=HIGH_SEVERITY_THRESHOLD {
+            history2.update(&log2);
+        }
+        assert!(history2.is_suspicious_activity(&log2).is_some());
+    }
+
+    #[test]
+    fn no_anomaly_below_threshold() {
+        let mut history = AlertHistory::default();
+        let log = json!({ "source_address": "10.0.0.1" });
+
+        for _ in 0..HIGH_SEVERITY_THRESHOLD {
             history.update(&log);
         }
 

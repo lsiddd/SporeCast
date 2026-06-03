@@ -2,6 +2,6 @@
 
 use serde_json::Value;
 
-pub(crate) trait GeoIpLookup {
+pub trait GeoIpLookup {
     fn lookup(&self, ip_str: &str) -> Option<Value>;
 }

@@ -66,7 +66,7 @@ pub const CRITICAL_ASSETS: [&str; 21] = [
     "plc",
 ];
 
-pub const CORRELATION_RULES: [(&str, &str); 15] = [
+pub const CORRELATION_RULES: [(&str, &str); 18] = [
     (
         "brute_force",
         r"(?i)(authentication failure|login failed|invalid password|bad password)",
@@ -126,6 +126,18 @@ pub const CORRELATION_RULES: [(&str, &str); 15] = [
     (
         "crypto_mining",
         r"(?i)(crypto mining|cryptocurrency|bitcoin|monero|mining pool)",
+    ),
+    (
+        "sql_injection_attempt",
+        r"(?i)(sql injection|sqli|union\s+select|drop\s+table|insert\s+into)",
+    ),
+    (
+        "network_threat_detected",
+        r"(?i)(threat|vulnerability|exploit|attack|intrusion)",
+    ),
+    (
+        "high_risk_protocol",
+        r"(?i)\b(telnet|rsh|rlogin|tftp|ftp)\b",
     ),
 ];
 
