@@ -1,4 +1,4 @@
-//! User-facing entry points.
-//!
-//! The binaries currently own CLI parsing. This layer is reserved for moving
-//! that logic behind stable run functions in a later migration step.
+//! User-facing entry points — CLI-independent run functions for each binary pipeline.
+
+pub mod palo_alto;
+pub mod tshark;
