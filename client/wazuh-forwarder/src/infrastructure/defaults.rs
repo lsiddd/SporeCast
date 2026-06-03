@@ -22,26 +22,27 @@ pub const CIRCUIT_BREAKER_FAILURE_THRESHOLD: usize = 5;
 pub const CIRCUIT_BREAKER_TIMEOUT_SECS: u64 = 30;
 pub const CIRCUIT_BREAKER_SUCCESS_THRESHOLD: usize = 3;
 
+pub const ENABLE_BEHAVIORAL_ANALYSIS_DEFAULT: bool = true;
+pub const BEHAVIOR_WINDOW_MINUTES_DEFAULT: i64 = 5;
+pub const HIGH_SEVERITY_THRESHOLD_DEFAULT: u32 = 10;
+
 pub const ENABLE_THREAT_INTEL_FEEDS: bool = true;
 pub const THREAT_INTEL_REFRESH_INTERVAL_SECS: u64 = 86400;
-pub const THREAT_INTEL_CACHE_DIR: &str = "/var/lib/forwarder/threat_intel_cache";
+pub const THREAT_INTEL_CACHE_DIR: &str = "run/threat_intel_cache";
 
-pub const IP_FEED_URLS: [&str; 15] = [
+pub const IP_FEED_URLS: [&str; 12] = [
     "https://lists.blocklist.de/lists/all.txt",
     "https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level1.netset",
     "https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level2.netset",
     "https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/dshield.netset",
     "https://www.binarydefense.com/banlist.txt",
     "https://rules.emergingthreats.net/fwrules/emerging-Block-IPs.txt",
-    "https://raw.githubusercontent.com/abuseipdb/blacklist/master/abuseipdb-s100-all.txt",
-    "https://raw.githubusercontent.com/mitchellkrogza/Badd-Boyz-Hosts/master/ips.txt",
     "https://www.spamhaus.org/drop/drop.txt",
     "https://www.spamhaus.org/drop/edrop.txt",
     "https://feodotracker.abuse.ch/downloads/ipblocklist.txt",
     "https://check.torproject.org/torbulkexitlist?ip=1.1.1.1",
     "https://raw.githubusercontent.com/stamparm/ipsum/master/ipsum.txt",
     "https://cinsscore.com/list/ci-badguys.txt",
-    "https://www.openbl.org/lists/base.txt",
 ];
 
 pub const DOMAIN_FEED_URLS: [&str; 5] = [

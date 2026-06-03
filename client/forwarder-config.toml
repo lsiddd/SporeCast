@@ -25,8 +25,8 @@ socket_timeout_secs = 10
 
 [logging]
 # Log file path for the forwarder application itself
-log_file = "/var/log/forwarder.log"
-state_file = "/var/lib/forwarder/state.json"
+log_file = "run/forwarder.log"
+state_file = "run/state.json"
 
 [performance]
 # Queue sizes for different processing stages
@@ -45,7 +45,7 @@ elk_batch_flush_interval_secs = 1
 # Enable threat intelligence feed fetching and enrichment
 enable_threat_intel_feeds = true
 threat_intel_refresh_interval_secs = 86400  # 24 hours
-threat_intel_cache_dir = "/var/lib/forwarder/threat_intel_cache"
+threat_intel_cache_dir = "run/threat_intel_cache"
 
 [behavioral_analysis]
 # Enable behavioral analysis and anomaly detection
@@ -62,4 +62,4 @@ high_severity_threshold = 10
 # Download: https://db-ip.com/db/download/ip-to-city-lite (free MMDB, no account needed)
 # Or use MaxMind GeoLite2-City.mmdb if you have a license key.
 enabled = true
-database_path = "/var/lib/palo-alto-forwarder/geoip/dbip-city-lite.mmdb"
+database_path = "run/geoip/dbip-city-lite.mmdb"

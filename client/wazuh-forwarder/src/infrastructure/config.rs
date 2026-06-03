@@ -3,12 +3,10 @@ use std::fs;
 use std::path::Path;
 use thiserror::Error;
 
-use crate::domain::rules::{
-    BEHAVIOR_WINDOW_MINUTES, ENABLE_BEHAVIORAL_ANALYSIS, HIGH_SEVERITY_THRESHOLD,
-};
 use crate::infrastructure::defaults::{
-    ELK_BATCH_FLUSH_INTERVAL_SECS, ELK_BATCH_SIZE, ENABLE_THREAT_INTEL_FEEDS,
-    ENRICHMENT_WORKER_COUNT, MAX_ENRICHMENT_QUEUE_SIZE, MAX_RECEIVER_QUEUE_SIZE,
+    BEHAVIOR_WINDOW_MINUTES_DEFAULT, ELK_BATCH_FLUSH_INTERVAL_SECS, ELK_BATCH_SIZE,
+    ENABLE_BEHAVIORAL_ANALYSIS_DEFAULT, ENABLE_THREAT_INTEL_FEEDS, ENRICHMENT_WORKER_COUNT,
+    HIGH_SEVERITY_THRESHOLD_DEFAULT, MAX_ENRICHMENT_QUEUE_SIZE, MAX_RECEIVER_QUEUE_SIZE,
     MAX_WAZUH_QUEUE_SIZE, SOCKET_TIMEOUT_SECS, THREAT_INTEL_CACHE_DIR,
     THREAT_INTEL_REFRESH_INTERVAL_SECS, WAZUH_LOCAL_SYSLOG_HOST, WAZUH_LOCAL_SYSLOG_PORT,
 };
@@ -16,8 +14,8 @@ use crate::infrastructure::defaults::{
 const PALO_ALTO_SYSLOG_PORT: u16 = 514;
 const ELK_HOST: &str = "127.0.0.1";
 const ELK_PORT: u16 = 5142;
-const LOG_FILE: &str = "/var/log/palo_alto_forwarder.log";
-const STATE_FILE: &str = "/var/lib/palo-alto-forwarder/forwarder_state.json";
+const LOG_FILE: &str = "run/forwarder.log";
+const STATE_FILE: &str = "run/state.json";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 /// Complete runtime configuration loaded from TOML.
@@ -104,7 +102,7 @@ impl Default for GeoIpConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            database_path: "/var/lib/palo-alto-forwarder/geoip/dbip-city-lite.mmdb".to_string(),
+            database_path: "run/geoip/dbip-city-lite.mmdb".to_string(),
         }
     }
 }
@@ -167,9 +165,9 @@ impl Default for ForwarderConfig {
                 threat_intel_cache_dir: THREAT_INTEL_CACHE_DIR.to_string(),
             },
             behavioral_analysis: BehavioralConfig {
-                enable_behavioral_analysis: ENABLE_BEHAVIORAL_ANALYSIS,
-                behavior_window_minutes: BEHAVIOR_WINDOW_MINUTES,
-                high_severity_threshold: HIGH_SEVERITY_THRESHOLD,
+                enable_behavioral_analysis: ENABLE_BEHAVIORAL_ANALYSIS_DEFAULT,
+                behavior_window_minutes: BEHAVIOR_WINDOW_MINUTES_DEFAULT,
+                high_severity_threshold: HIGH_SEVERITY_THRESHOLD_DEFAULT,
             },
             palo_alto: PaloAltoConfig::default(),
             geoip: GeoIpConfig::default(),
@@ -253,6 +251,28 @@ impl ForwarderConfig {
     /// Returns true when the configured forwarder type is Palo Alto.
     pub fn is_palo_alto(&self) -> bool {
         self.forwarder.forwarder_type == "palo_alto"
+    }
+
+    /// Remaps paths that start with `/var/` to a project-local `run/` directory.
+    /// Call this in binaries that run without root (dev/test mode).
+    pub fn resolve_user_paths(&mut self) {
+        let run_dir = "run";
+        std::fs::create_dir_all(format!("{}/geoip", run_dir)).ok();
+        std::fs::create_dir_all(format!("{}/threat_intel_cache", run_dir)).ok();
+
+        if self.logging.log_file.starts_with("/var/") {
+            self.logging.log_file = format!("{}/forwarder.log", run_dir);
+        }
+        if self.logging.state_file.starts_with("/var/") {
+            self.logging.state_file = format!("{}/state.json", run_dir);
+        }
+        if self.threat_intelligence.threat_intel_cache_dir.starts_with("/var/") {
+            self.threat_intelligence.threat_intel_cache_dir =
+                format!("{}/threat_intel_cache", run_dir);
+        }
+        if self.geoip.database_path.starts_with("/var/") {
+            self.geoip.database_path = format!("{}/geoip/dbip-city-lite.mmdb", run_dir);
+        }
     }
 }
 
