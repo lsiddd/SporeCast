@@ -33,6 +33,7 @@ impl ConnectionPool {
         {
             let mut pool = self.connections.lock();
             if let Some(stream) = pool.pop_front() {
+                super::increment_saturating(&self.active_count, Ordering::Relaxed);
                 debug!(
                     "Reused connection from pool, active: {}",
                     self.active_count.load(Ordering::Relaxed)
@@ -65,6 +66,7 @@ impl ConnectionPool {
         let mut pool = self.connections.lock();
         if pool.len() < self.max_size {
             pool.push_back(stream);
+            decrement_saturating(&self.active_count, Ordering::Relaxed);
             debug!("Returned connection to pool, pool size: {}", pool.len());
         } else {
             decrement_saturating(&self.active_count, Ordering::Relaxed);
@@ -87,5 +89,88 @@ fn decrement_saturating(counter: &AtomicUsize, ordering: Ordering) -> usize {
         Some(value.saturating_sub(1))
     }) {
         Ok(previous) | Err(previous) => previous.saturating_sub(1),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    async fn local_listener(accept_count: usize) -> (String, u16, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("local TCP listener should bind");
+        let addr = listener
+            .local_addr()
+            .expect("local listener address should be available");
+        let handle = tokio::spawn(async move {
+            for _ in 0..accept_count {
+                let _accepted = listener
+                    .accept()
+                    .await
+                    .expect("pool should connect to local listener");
+            }
+        });
+        (addr.ip().to_string(), addr.port(), handle)
+    }
+
+    #[tokio::test]
+    async fn returned_connection_counts_as_idle_not_active() {
+        let (host, port, accept_task) = local_listener(1).await;
+        let pool = ConnectionPool::new(host, port, 1);
+
+        let stream = pool
+            .get_connection()
+            .await
+            .expect("pool should open a local connection");
+        assert_eq!(pool.stats(), (0, 1));
+
+        pool.return_connection(stream);
+
+        assert_eq!(pool.stats(), (1, 0));
+        accept_task.await.expect("accept task should not panic");
+    }
+
+    #[tokio::test]
+    async fn reused_idle_connection_counts_as_active_until_returned_again() {
+        let (host, port, accept_task) = local_listener(1).await;
+        let pool = ConnectionPool::new(host, port, 1);
+        let stream = pool
+            .get_connection()
+            .await
+            .expect("pool should open a local connection");
+        pool.return_connection(stream);
+
+        let reused = pool
+            .get_connection()
+            .await
+            .expect("pool should reuse idle connection");
+
+        assert_eq!(pool.stats(), (0, 1));
+        pool.return_connection(reused);
+        assert_eq!(pool.stats(), (1, 0));
+        accept_task.await.expect("accept task should not panic");
+    }
+
+    #[tokio::test]
+    async fn returning_more_than_max_idle_drops_excess_connection() {
+        let (host, port, accept_task) = local_listener(2).await;
+        let pool = ConnectionPool::new(host, port, 1);
+        let first = pool
+            .get_connection()
+            .await
+            .expect("first local connection should open");
+        let second = pool
+            .get_connection()
+            .await
+            .expect("second local connection should open");
+        assert_eq!(pool.stats(), (0, 2));
+
+        pool.return_connection(first);
+        pool.return_connection(second);
+
+        assert_eq!(pool.stats(), (1, 0));
+        accept_task.await.expect("accept task should not panic");
     }
 }
