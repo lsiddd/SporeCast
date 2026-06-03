@@ -288,7 +288,9 @@ pub async fn run_stdin(config: ForwarderConfig) -> Result<()> {
                     parsed,
                     &intel_arc,
                     &mut state,
-                    geoip.as_deref().map(|g| g as &dyn crate::domain::ports::GeoIpLookup),
+                    geoip
+                        .as_deref()
+                        .map(|g| g as &dyn crate::domain::ports::GeoIpLookup),
                 );
                 if let Ok(json_str) = serde_json::to_string(&enriched) {
                     let mut out = stdout.lock();
@@ -296,7 +298,11 @@ pub async fn run_stdin(config: ForwarderConfig) -> Result<()> {
                 }
             }
             Err(e) => {
-                warn!("Failed to parse line: {}. Line: {}", e, &line[..line.len().min(80)]);
+                warn!(
+                    "Failed to parse line: {}. Line: {}",
+                    e,
+                    &line[..line.len().min(80)]
+                );
             }
         }
     }

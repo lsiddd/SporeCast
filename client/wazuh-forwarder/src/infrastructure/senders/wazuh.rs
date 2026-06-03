@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use crossbeam_channel::Receiver;
 use log::{info, warn};
 use std::{
@@ -11,6 +11,39 @@ use std::{
 use tokio::{net::UdpSocket, task, time::timeout};
 
 use crate::infrastructure::performance::get_circuit_breaker;
+use crate::infrastructure::performance::CircuitBreaker;
+
+#[derive(Debug, Default, Eq, PartialEq)]
+pub(crate) struct WazuhSendOutcome {
+    pub sent: bool,
+}
+
+pub(crate) async fn send_wazuh_enriched_log(
+    socket: &UdpSocket,
+    wazuh_addr: &str,
+    enriched_log: &str,
+    circuit_breaker: &CircuitBreaker,
+) -> Result<WazuhSendOutcome> {
+    match timeout(
+        Duration::from_secs(5),
+        socket.send_to(enriched_log.as_bytes(), wazuh_addr),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {
+            circuit_breaker.record_success();
+            Ok(WazuhSendOutcome { sent: true })
+        }
+        Ok(Err(e)) => {
+            circuit_breaker.record_failure();
+            Err(anyhow!("Failed to send enriched log to Wazuh: {}", e))
+        }
+        Err(_) => {
+            circuit_breaker.record_failure();
+            Err(anyhow!("Failed to send enriched log to Wazuh: timeout"))
+        }
+    }
+}
 
 /// Sends enriched syslog lines to the local Wazuh syslog endpoint over UDP.
 #[tracing::instrument(skip(wazuh_enriched_rx, shutdown))]
@@ -46,34 +79,19 @@ pub async fn wazuh_enriched_syslog_sender_thread(
 
         match recv_result {
             Ok(enriched_log) => {
-                match timeout(
-                    Duration::from_secs(5),
-                    socket.send_to(enriched_log.as_bytes(), &wazuh_addr),
-                )
-                .await
+                match send_wazuh_enriched_log(&socket, &wazuh_addr, &enriched_log, &circuit_breaker)
+                    .await
                 {
-                    Ok(Ok(_)) => {
+                    Ok(WazuhSendOutcome { sent: true }) => {
                         sent_count = sent_count.saturating_add(1);
-                        circuit_breaker.record_success();
                         if sent_count.is_multiple_of(100) {
                             info!("Sent {} enriched logs to Wazuh", sent_count);
                         }
                     }
-                    Ok(Err(e)) => {
+                    Ok(WazuhSendOutcome { sent: false }) => {}
+                    Err(e) => {
                         failed_count = failed_count.saturating_add(1);
-                        circuit_breaker.record_failure();
-                        warn!(
-                            "Failed to send enriched log to Wazuh: {}. Total failed: {}",
-                            e, failed_count
-                        );
-                    }
-                    Err(_) => {
-                        failed_count = failed_count.saturating_add(1);
-                        circuit_breaker.record_failure();
-                        warn!(
-                            "Failed to send enriched log to Wazuh: timeout. Total failed: {}",
-                            failed_count
-                        );
+                        warn!("{}. Total failed: {}", e, failed_count);
                     }
                 }
             }
@@ -91,4 +109,63 @@ pub async fn wazuh_enriched_syslog_sender_thread(
         sent_count, failed_count
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossbeam_channel::bounded;
+
+    #[tokio::test]
+    async fn send_wazuh_enriched_log_sends_udp_payload_to_local_socket() {
+        let receiver = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("local UDP receiver should bind");
+        let addr = receiver
+            .local_addr()
+            .expect("local UDP receiver address should be available");
+        let sender = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("local UDP sender should bind");
+        let breaker = CircuitBreaker::new("wazuh_unit_send");
+
+        let outcome =
+            send_wazuh_enriched_log(&sender, &addr.to_string(), "enriched syslog", &breaker)
+                .await
+                .expect("UDP send should succeed");
+
+        assert_eq!(outcome, WazuhSendOutcome { sent: true });
+        let mut buf = [0_u8; 128];
+        let (len, _) = receiver
+            .recv_from(&mut buf)
+            .await
+            .expect("receiver should get UDP payload");
+        assert_eq!(&buf[..len], b"enriched syslog");
+    }
+
+    #[tokio::test]
+    async fn wazuh_sender_loop_drains_queued_message_until_channel_disconnects() {
+        let receiver = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("local UDP receiver should bind");
+        let addr = receiver
+            .local_addr()
+            .expect("local UDP receiver address should be available");
+        let (tx, rx) = bounded(1);
+        tx.try_send("loop syslog".to_string())
+            .expect("sender queue should accept fixture");
+        drop(tx);
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        wazuh_enriched_syslog_sender_thread(rx, shutdown, addr.ip().to_string(), addr.port())
+            .await
+            .expect("sender loop should drain and exit on disconnect");
+
+        let mut buf = [0_u8; 128];
+        let (len, _) = receiver
+            .recv_from(&mut buf)
+            .await
+            .expect("receiver should get UDP payload");
+        assert_eq!(&buf[..len], b"loop syslog");
+    }
 }

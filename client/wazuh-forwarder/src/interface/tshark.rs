@@ -2,8 +2,8 @@ use anyhow::{anyhow, Context, Result};
 use chrono::Local;
 use crossbeam_channel::bounded;
 use log::{error, info, warn};
-use serde_json::Value;
 use parking_lot::Mutex;
+use serde_json::Value;
 use std::{
     io::{self, Write},
     sync::{
@@ -79,18 +79,17 @@ pub async fn run(config: ForwarderConfig, stdout_mode: bool) -> Result<()> {
 
     let threat_intel_db = Arc::new(Mutex::new(ThreatIntel::new()));
     let intel_ready = Arc::new(AtomicBool::new(false));
-    let threat_intel_handle =
-        if config.threat_intelligence.enable_threat_intel_feeds {
-            let intel_clone = threat_intel_db.clone();
-            let shutdown_clone = shutdown.clone();
-            let intel_ready_clone = intel_ready.clone();
-            Some(tokio::spawn(async move {
-                threat_intel_updater_thread(intel_clone, shutdown_clone, intel_ready_clone).await;
-            }))
-        } else {
-            intel_ready.store(true, Ordering::Relaxed);
-            None
-        };
+    let threat_intel_handle = if config.threat_intelligence.enable_threat_intel_feeds {
+        let intel_clone = threat_intel_db.clone();
+        let shutdown_clone = shutdown.clone();
+        let intel_ready_clone = intel_ready.clone();
+        Some(tokio::spawn(async move {
+            threat_intel_updater_thread(intel_clone, shutdown_clone, intel_ready_clone).await;
+        }))
+    } else {
+        intel_ready.store(true, Ordering::Relaxed);
+        None
+    };
 
     let state_merger_handle = thread::Builder::new()
         .name("state_merger".to_string())

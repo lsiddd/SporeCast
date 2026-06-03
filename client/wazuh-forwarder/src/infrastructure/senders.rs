@@ -178,3 +178,52 @@ async fn flush_batch_to_elk(
         Err(_) => Err(anyhow!("ELK write operation timed out")),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tokio::{io::AsyncReadExt, net::TcpListener};
+
+    #[tokio::test]
+    async fn flush_batch_writes_newline_delimited_json_to_tcp_stream() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("local TCP listener should bind");
+        let addr = listener
+            .local_addr()
+            .expect("local listener address should be available");
+        let received = tokio::spawn(async move {
+            let (mut stream, _) = listener
+                .accept()
+                .await
+                .expect("flush should connect to local listener");
+            let mut bytes = Vec::new();
+            stream
+                .read_to_end(&mut bytes)
+                .await
+                .expect("listener should read payload");
+            String::from_utf8(bytes).expect("payload should be UTF-8")
+        });
+        let pool = Arc::new(ConnectionPool::new(addr.ip().to_string(), addr.port(), 1));
+        let breaker = Arc::new(CircuitBreaker::new("test_elk_flush"));
+        let batch = [json!({ "event": "first" }), json!({ "event": "second" })];
+
+        flush_batch_to_elk(&batch, &pool, &breaker)
+            .await
+            .expect("batch should flush to local listener");
+        drop(pool);
+
+        let payload = received.await.expect("listener task should not panic");
+        let lines: Vec<&str> = payload.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            serde_json::from_str::<Value>(lines[0]).expect("first line should be JSON"),
+            json!({ "event": "first" })
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(lines[1]).expect("second line should be JSON"),
+            json!({ "event": "second" })
+        );
+    }
+}
